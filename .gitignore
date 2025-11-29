@@ -1,0 +1,9 @@
+# .gitignore
+
+# 隠すもの（Pro版の魂）
+src/affective_brain_pro.py
+*.pt
+
+# experiments は公開するが、特定の危ないファイルだけ隠すならここに書く
+experiments/09_affective_state_manager.py
+experiments/10_integrated_soul.py

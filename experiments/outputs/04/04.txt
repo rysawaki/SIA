@@ -1,0 +1,5 @@
+[Step 1] Self Metrics: {'num_axes': 1, 'coherence': 1.0, 'diversity': 0.0, 'strength_sum': 0.5047953724861145}
+[Step 2] Self Metrics: {'num_axes': 1, 'coherence': 1.0, 'diversity': 0.0, 'strength_sum': 0.9848618507385254}
+[Step 3] Self Metrics: {'num_axes': 1, 'coherence': 1.0, 'diversity': 0.0, 'strength_sum': 1.4965848922729492}
+[Step 4] Self Metrics: {'num_axes': 1, 'coherence': 1.0, 'diversity': 0.0, 'strength_sum': 1.9092849493026733}
+[Step 5] Self Metrics: {'num_axes': 1, 'coherence': 1.0, 'diversity': 0.0, 'strength_sum': 2.074167490005493}

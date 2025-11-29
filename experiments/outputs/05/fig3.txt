@@ -1,0 +1,9 @@
+Logic: Shock ~ Min(Dist), Affect ~ Max(Sim)
+Step  | Type       | Shock    | Affect   | Action
+-------------------------------------------------------
+1     | A1(Init)   | 0.5000   | 1.0000   | Init
+2     | A2(Same)   | 0.6716   | 0.1000   | New
+3     | A3(Same)   | 0.3817   | 0.7085   | New
+4     | B1(Shock)  | 0.6303   | 0.2053   | New
+5     | B2(Adapt)  | 0.4656   | 0.5664   | New
+6     | A4(Return) | 0.5411   | 0.4143   | New
