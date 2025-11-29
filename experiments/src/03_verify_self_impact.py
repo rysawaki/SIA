@@ -54,12 +54,12 @@ def run_experiment():
     hidden_self, attn_self = model(input_ids, need_attention=True)
 
     # 6. Query変形の可視化
-    os.makedirs("experiments/outputs", exist_ok=True)
+    os.makedirs("../../experiments/outputs/03", exist_ok=True)
     visualize_query_deformation(
         Q=hidden_no_self[-1, 0],
         Q_cond=hidden_self[-1, 0],
         axes=model.self_space.axes[:model.self_space.num_active],
-        save_path="../outputs/03/query_deformation.png"
+        save_path="../outputs/03/03_query_deformation.png"
     )
 
     # 7. Attention比較の可視化
@@ -73,12 +73,12 @@ def run_experiment():
         axes[1, h].set_title(f"After Self - Head {h}")
 
     plt.tight_layout()
-    plt.savefig("outputs/attention_comparison.png", dpi=300)
+    plt.savefig("../../experiments/outputs/03/03_attention_comparison.png", dpi=300)
     plt.show()
 
     print("\nSaved outputs to:")
-    print(" - outputs/query_deformation.png")
-    print(" - outputs/attention_comparison.png")
+    print(" - outputs/03/03_query_deformation.png")
+    print(" - outputs/03/03_attention_comparison.png")
 
 
 if __name__ == "__main__":
