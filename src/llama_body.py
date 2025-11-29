@@ -64,6 +64,18 @@ class SelfInjectedLlama(nn.Module):
         self.self_space.update(trace, shock=shock, affect=affect)
         print(f"Experience Memorized: '{text}' (Shock={shock})")
 
+    def memorize_experience_vec(self, trace_vec: torch.Tensor, shock: float, affect: float):
+        """
+        Prediction Error (ベクトル) をTraceとしてSelfに刻む（新ロジック）
+        Active Inferenceにおける予測誤差の刻印に使用される。
+        """
+        self.self_space.update(
+            trace=trace_vec.to(self.device).to(torch.float16),
+            shock=shock,
+            affect=affect
+        )
+        # ログはController側で行うため、ここでは省略
+
     def generate_with_self(self, prompt, max_new_tokens=50, alpha=2.0, repetition_penalty=1.2):
         """
         Promptの埋め込みをSelfSpaceで歪ませてから生成を行う
@@ -98,6 +110,59 @@ class SelfInjectedLlama(nn.Module):
             # ここでは簡易的に全出力をデコードする
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             return generated_text
+
+    def generate_with_self_and_get_embed(self, prompt, max_new_tokens=50, alpha=2.0, repetition_penalty=1.2):
+        """
+        Selfで歪ませた埋め込みで生成を行い、結果テキストと応答の平均埋め込みを返す。
+        Active Inferenceにおける「観測（Observed）」を取得するために使用される。
+        
+        Returns:
+            tuple: (generated_text: str, observed_embed: torch.Tensor)
+                - generated_text: 生成されたテキスト
+                - observed_embed: 応答部分の平均埋め込みベクトル (D,)
+        """
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            # 1. 通常のEmbedding取得
+            inputs_embeds = self.model.get_input_embeddings()(inputs.input_ids)  # (B, Seq, Dim)
+
+            # 2. SIAによる歪み (Semantic Gravity)
+            B, S, D = inputs_embeds.shape
+            flat_embeds = inputs_embeds.view(B * S, D)
+            distorted_flat = self.self_space.condition(flat_embeds, alpha=alpha)
+            inputs_embeds_distorted = distorted_flat.view(B, S, D)
+
+            # 3. 歪んだ埋め込みを使って生成
+            outputs = self.model.generate(
+                inputs_embeds=inputs_embeds_distorted,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                repetition_penalty=repetition_penalty,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+            
+            # 4. 生成部分の埋め込みを取得 (Observed Embed)
+            # 全出力の埋め込みを取得
+            output_embeds = self.model.get_input_embeddings()(outputs)  # (B, Seq_out, Dim)
+            
+            # プロンプト部分を除いた「応答」部分の埋め込みのみを抽出
+            # inputs.input_ids.shape[-1] がプロンプトの長さ
+            prompt_len = inputs.input_ids.shape[-1]
+            response_embeds = output_embeds[:, prompt_len:]
+            
+            # 応答埋め込みの平均を Observed Embed とする (これが観測結果)
+            if response_embeds.shape[1] > 0:
+                observed_embed = response_embeds.mean(dim=1).squeeze(0)  # (D,)
+            else:
+                # 応答が空の場合（稀）、プロンプトの最後の埋め込みを使用
+                observed_embed = inputs_embeds[:, -1, :].squeeze(0)  # (D,)
+
+            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # テキストと埋め込みをセットで返す
+            return generated_text, observed_embed
 
     @torch.no_grad()
     def get_self_state_vector(self):

@@ -65,6 +65,26 @@ class AffectiveStateManager:
 
         print(f"[Affect Update] Stress: {self.stress:.2f} | Energy: {self.energy:.2f} | Arousal: {self.arousal:.2f}")
 
+    def perceive_prediction_error(self, impact: float):
+        """
+        幾何学的Prediction Errorの大きさを「論理的な痛み/驚き」として知覚する。
+        これは常にネガティブな刺激として処理される（Valence=-1.0相当）。
+        Active Inferenceにおける予測誤差を情動状態に反映させる。
+        
+        Args:
+            impact (float): 予測誤差の大きさ（0.0 〜 1.0程度）
+        """
+        # Prediction Errorは、予測外れ=Dissonanceであるため、常に負の刺激として処理する
+        
+        # 痛み (Pain) は予測誤差の大きさ（impact）に比例
+        pain_spike = impact 
+        
+        self.stress = min(1.0, self.stress + pain_spike)
+        self.arousal = min(1.0, self.arousal + pain_spike * 0.5)
+        self.energy = max(0.0, self.energy - pain_spike * 0.2)
+
+        print(f"    [Internal] Prediction Error Shock: {pain_spike:.3f} -> Brain Updated (Stress: {self.stress:.2f})")
+
     def get_control_signals(self):
         """
         現在の情動状態に基づいて、Llamaへの「注入指令」を計算する。
