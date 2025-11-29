@@ -1,4 +1,4 @@
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rysawaki/SIA/blob/main/notebooks/SIA_Demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rysawaki/SIA/blob/main/SIA_Demo.ipynb)
 
 # SIA: Self-Imprint Attribution
 ### A Framework for Aesthetic-Driven Learning and Irreversible Identity Formation
