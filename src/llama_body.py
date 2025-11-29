@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import sys
 import os
 
@@ -21,16 +21,28 @@ class SelfInjectedLlama(nn.Module):
         print(f"Loading Llama model: {model_name}...")
         self.device = device
 
-        # モデルとトークナイザーのロード
-        # GTX 1650 (4GB) 向けに float16 と device_map="auto" を使用
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # ★追加: 4-bit 量子化設定 (VRAMを極限まで節約)
+        nf4_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16
+        )
+
+        # モデルとトークナイザーのロード
+        # 既存の float16, device_map="auto" は削除し、4-bit設定に置き換えます
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
+            # torch_dtype=torch.float16,  # ← 削除またはコメントアウト
+            # device_map="auto",         # ← 削除またはコメントアウト
+            quantization_config=nf4_config,  # ★追加: 4-bit設定を適用
+            device_map="auto",  # ★再度追加: device_map="auto" は必須
             low_cpu_mem_usage=True
         )
         self.model.eval()
+
 
         # 隠れ層の次元を取得 (TinyLlamaなら2048, Llama-3-8Bなら4096)
         self.hidden_dim = self.model.config.hidden_size
