@@ -106,7 +106,8 @@ SIA/
 │   ├── llama_body.py       # [Somatic Interface] LLMへの介入・歪み生成
 │   └── ...
 ├── experiments/            # Proof of Concept Codes
-└── main.py                 # Integrated Soul Agent
+├── main.py                 # Integrated Soul Agent
+└── README.md
 ```
 
 ---
