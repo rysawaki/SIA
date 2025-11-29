@@ -1,6 +1,6 @@
 # ============================
 # file: visualize_selfspace.py
-# 可視化：Self-conditioning による Query 歪みと Self軸の構造
+# Visualization: Query Deformation by Self-conditioning and Structure of Self-Axes
 # ============================
 
 import torch
@@ -11,8 +11,13 @@ from sklearn.decomposition import PCA
 
 def project_to_2d(vectors: torch.Tensor):
     """
-    ベクトル群 (N, d) を PCA によって 2次元へ射影する。
-    戻り値は numpy 配列 shape: (N, 2)
+    Projects a set of vectors (N, d) into 2D space using PCA.
+
+    Args:
+        vectors (torch.Tensor): Input vectors with shape (N, d).
+
+    Returns:
+        numpy.ndarray: Projected vectors with shape (N, 2).
     """
     pca = PCA(n_components=2)
     return pca.fit_transform(vectors.detach().cpu().numpy())
@@ -20,14 +25,21 @@ def project_to_2d(vectors: torch.Tensor):
 
 def visualize_query_deformation(Q, Q_cond, axes=None, save_path=None):
     """
-    Query と Self-conditioned Query の幾何学的変形を可視化。
+    Visualizes the geometric deformation of the Query caused by Self-conditioning.
+    This plot helps analyze how the 'Self' biases or distorts the input Query.
 
     Parameters:
-        Q:       (d,) or (N, d)   元のクエリ（単一 or 複数）
-        Q_cond:  (d,) or (N, d)   Self を通した後のクエリ
-        axes:    (k, d) or None   Self軸 (optional)
+        Q (torch.Tensor):      (d,) or (N, d)
+            The original input query (Raw perception/Objective data).
+        Q_cond (torch.Tensor): (d,) or (N, d)
+            The query after passing through the Self-module (Subjective/Biased perception).
+        axes (torch.Tensor):   (k, d) or None
+            The internal axes of the Self (e.g., Principal components of the Self-matrix).
+            Optional.
+        save_path (str):       Path to save the figure. If None, it just shows the plot.
     """
-    if Q.dim() == 1:  # (d,) → (1, d)
+    # Ensure batch dimension exists: (d,) -> (1, d)
+    if Q.dim() == 1:
         Q = Q.unsqueeze(0)
         Q_cond = Q_cond.unsqueeze(0)
 
@@ -40,19 +52,23 @@ def visualize_query_deformation(Q, Q_cond, axes=None, save_path=None):
         labels.append("Self axes")
         colors.append("green")
 
-    data_cat = torch.cat(data, dim=0)  # (N_total, d)
-    proj_2d = project_to_2d(data_cat)  # (N_total, 2)
+    # Concatenate all data for unified PCA projection
+    data_cat = torch.cat(data, dim=0)  # Shape: (N_total, d)
+    proj_2d = project_to_2d(data_cat)  # Shape: (N_total, 2)
 
+    # Define indices for slicing the projected data
     idx_Q = range(len(Q))
     idx_Qc = range(len(Q), len(Q) + len(Q_cond))
     idx_axes = range(len(Q) + len(Q_cond), proj_2d.shape[0])
 
     plt.figure(figsize=(7, 6))
 
-    plt.scatter(proj_2d[idx_Q, 0], proj_2d[idx_Q, 1], label="Original Q", s=60, marker='o')
-    plt.scatter(proj_2d[idx_Qc, 0], proj_2d[idx_Qc, 1], label="Self-conditioned Q", s=60, marker='x')
+    # Plot Original and Conditioned Queries
+    plt.scatter(proj_2d[idx_Q, 0], proj_2d[idx_Q, 1], label="Original Q", s=60, marker='o', c='blue', alpha=0.7)
+    plt.scatter(proj_2d[idx_Qc, 0], proj_2d[idx_Qc, 1], label="Self-conditioned Q", s=60, marker='x', c='red')
 
-    # 変形ベクトルを矢印で表示
+    # Visualize the deformation vector (shift) using arrows
+    # This represents the "force" or "bias" applied by the Self.
     for i in range(len(Q)):
         plt.arrow(
             proj_2d[idx_Q][i, 0], proj_2d[idx_Q][i, 1],
@@ -61,9 +77,9 @@ def visualize_query_deformation(Q, Q_cond, axes=None, save_path=None):
             color="gray", alpha=0.6, width=0.003
         )
 
-    # Self軸があるなら表示
+    # Plot Self axes if provided (shows the structural basis of the Self)
     if axes is not None:
-        plt.scatter(proj_2d[idx_axes, 0], proj_2d[idx_axes, 1], label="Self axes", s=80, marker='^')
+        plt.scatter(proj_2d[idx_axes, 0], proj_2d[idx_axes, 1], label="Self axes", s=80, marker='^', c='green')
 
     plt.title("Geometric Deformation of Query by Self")
     plt.legend()
@@ -76,8 +92,15 @@ def visualize_query_deformation(Q, Q_cond, axes=None, save_path=None):
 
 def visualize_self_axes(axes, save_path=None):
     """
-    SelfSpace 内の軸（多様性／方向性）をプロット。
-    Self が固定化に向かっているのか、広がっているのか可視化。
+    Plots the axes within SelfSpace to visualize Diversity vs. Directionality.
+
+    This visualization helps determine if the Self is:
+    1. Converging/Fixating (Axes clustered together)
+    2. Expanding/Generalizing (Axes spread out)
+
+    Args:
+        axes (torch.Tensor): The basis vectors representing the Self state.
+        save_path (str): Output path.
     """
     if axes is None or len(axes) == 0:
         print("No Self axes to visualize.")
@@ -86,12 +109,14 @@ def visualize_self_axes(axes, save_path=None):
     proj_2d = project_to_2d(axes)  # (k, 2)
 
     plt.figure(figsize=(6, 6))
-    plt.scatter(proj_2d[:, 0], proj_2d[:, 1], s=80, c='green')
+    plt.scatter(proj_2d[:, 0], proj_2d[:, 1], s=80, c='green', marker='^')
 
     for i, (x, y) in enumerate(proj_2d):
-        plt.text(x, y, f"Axis {i}", fontsize=9)
+        plt.text(x, y, f"Axis {i}", fontsize=9, ha='right')
 
     plt.title("Distribution of Self Axes (PCA Projection)")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
     plt.grid(True, alpha=0.3)
 
     if save_path:
@@ -101,16 +126,30 @@ def visualize_self_axes(axes, save_path=None):
 
 def compare_before_after(Q_before, Q_after, title="Before vs After Self Update"):
     """
-    Self 更新前後で Query がどの程度変わったかを可視化。
-    （Selfの学習効果を検証できる）
+    Visualizes how the Query processing changes before and after a Self Update.
+    This is used to verify the 'learning effect' or 'plasticity' of the Self.
+
+    Args:
+        Q_before (torch.Tensor): Query conditioned by the Self *before* update.
+        Q_after (torch.Tensor):  Query conditioned by the Self *after* update.
+        title (str): Plot title.
     """
     data = torch.cat([Q_before, Q_after], dim=0)
     proj_2d = project_to_2d(data)
 
     N = len(Q_before)
     plt.figure(figsize=(7, 6))
-    plt.scatter(proj_2d[:N, 0], proj_2d[:N, 1], label="Before Update", s=60, marker='o')
-    plt.scatter(proj_2d[N:, 0], proj_2d[N:, 1], label="After Update", s=60, marker='x')
+
+    plt.scatter(proj_2d[:N, 0], proj_2d[:N, 1], label="Before Update", s=60, marker='o', alpha=0.6)
+    plt.scatter(proj_2d[N:, 0], proj_2d[N:, 1], label="After Update", s=60, marker='x', c='red')
+
+    # Draw connection lines to show the shift trajectory
+    for i in range(N):
+        plt.plot(
+            [proj_2d[i, 0], proj_2d[N + i, 0]],
+            [proj_2d[i, 1], proj_2d[N + i, 1]],
+            'k--', alpha=0.3
+        )
 
     plt.title(title)
     plt.legend()

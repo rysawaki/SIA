@@ -12,7 +12,7 @@ from src.llama_body import SelfInjectedLlama
 from src.affective_brain import AffectiveStateManager
 
 # 保存パス
-SAVE_PATH = "sia_soul_state.pt"
+SAVE_PATH = "experiments/sia_soul_state.pt"
 
 # 簡易的な感情判定（本来はここもBERT等でやるべきだが、VRAM節約のためルールベースで代用）
 def simple_amygdala(text):
