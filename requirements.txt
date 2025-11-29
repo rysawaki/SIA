@@ -7,3 +7,4 @@ accelerate
 bitsandbytes
 sentencepiece
 protobuf
+imageio
