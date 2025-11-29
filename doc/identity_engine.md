@@ -1,4 +1,5 @@
-🧠 Identity Engine ― 概念仕様書（A4・1枚）
+🧠 Identity Engine ― 概念仕様書
+
 1️⃣ 目的 ― なぜIdentity Engineが必要か
 
 従来のAIは「入力に対する最適な出力」を繰り返すだけで、
