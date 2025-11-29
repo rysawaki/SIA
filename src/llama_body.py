@@ -36,6 +36,11 @@ class SelfInjectedLlama(nn.Module):
         self.hidden_dim = self.model.config.hidden_size
         print(f"Hidden Dimension: {self.hidden_dim}")
 
+        # 予測ヘッドの追加 (Selfの状態から次の埋め込みを予測)
+        # Selfの状態ベクトルを受け取り、hidden_dimのベクトルを出力する最小の構造
+        # ここではSelfSpaceの次元（hidden_dim）と同じと仮定
+        self.prediction_head = nn.Linear(self.hidden_dim, self.hidden_dim).to(self.device).to(torch.float16)
+
 
         # SelfSpaceの初期化 (モデルの次元に合わせる)
         self.self_space = SelfSpace(dim=self.hidden_dim, max_axes=5, device=device)
@@ -94,6 +99,24 @@ class SelfInjectedLlama(nn.Module):
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             return generated_text
 
+    @torch.no_grad()
+    def get_self_state_vector(self):
+        """現在のSelfSpaceの状態を単一ベクトルとして圧縮して返す（Predictorの入力用）"""
+        k = self.self_space.num_active.item()
+        if k == 0:
+            return torch.zeros(self.hidden_dim, device=self.device, dtype=torch.float16)
+
+        # 最もシンプルに、有効な軸の加重平均をSelfの代表ベクトルとする
+        axes = self.self_space.axes[:k]
+        strength = F.relu(self.self_space.strength[:k]) + 1e-6
+        weights = strength / strength.sum()
+        return torch.matmul(weights.unsqueeze(0), axes).squeeze(0) # (D,)
+
+    def predict_expected_embed(self):
+        """Prediction Headを使って、次のステップで期待される埋め込みを生成"""
+        state_vec = self.get_self_state_vector()
+        # Prediction Headを呼び出す
+        return self.prediction_head(state_vec)
 
 def run_llama_experiment():
     # 軽量モデルを指定 (VRAM 4GB対応)
