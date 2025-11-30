@@ -9,9 +9,8 @@ from sklearn.decomposition import PCA
 # パス解決
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.mini_transformer import MiniTransformer
+from src.transformer.mini_transformer import MiniTransformer
 # SelfSpaceの定義が必要なためimport（型チェック等で使う場合）
-from src.self_space import SelfSpace
 
 # 再現性
 torch.manual_seed(42)

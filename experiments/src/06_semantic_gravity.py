@@ -9,7 +9,7 @@ from sklearn.decomposition import PCA
 # パス解決
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.self_space import SelfSpace
+from src.identity.core.self_space import SelfSpace
 
 # 再現性
 torch.manual_seed(42)

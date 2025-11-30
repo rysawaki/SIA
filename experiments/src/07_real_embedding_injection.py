@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import sys
 import os
 
 # パス解決（既存のディレクトリ構造に合わせています）
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.self_space import SelfSpace
+from src.identity.core.self_space import SelfSpace
 
 
 class SelfInjectedLlama(nn.Module):

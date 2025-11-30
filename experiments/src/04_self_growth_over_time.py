@@ -6,8 +6,7 @@ from sklearn.decomposition import PCA
 
 # パス解決
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.self_space import SelfSpace
-from src.mini_transformer import MiniTransformer
+from src.transformer.mini_transformer import MiniTransformer
 
 def run_experiment_over_time():
     torch.manual_seed(42)

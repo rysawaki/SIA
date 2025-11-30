@@ -2,8 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .self_space import SelfSpace
-from .self_attention import SelfConditionedEncoderLayer
+from src.identity.core.self_space import SelfSpace
+from src.transformer.self_attention import SelfConditionedEncoderLayer
 
 
 class SimpleEncoderLayer(nn.Module):

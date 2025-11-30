@@ -13,8 +13,8 @@ import torch
 import os
 import matplotlib.pyplot as plt
 
-from src.mini_transformer import MiniTransformer
-from src.visualize_selfspace import visualize_query_deformation
+from src.transformer.mini_transformer import MiniTransformer
+from src.utils.visualize_selfspace import visualize_query_deformation
 
 
 def run_experiment():

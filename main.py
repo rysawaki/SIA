@@ -6,9 +6,9 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # SIAモジュールのインポート
-from src.llama_body import SelfInjectedLlama
-from src.affective_brain import AffectiveStateManager
-from src.sia_controller import SIA_Controller
+from src.transformer.llama_body import SelfInjectedLlama
+from src.identity.dynamics.affective_brain import AffectiveStateManager
+from src.controller.sia_controller import SIA_Controller
 
 # 保存パス
 SAVE_PATH = "experiments/sia_soul_state.pt"

@@ -34,8 +34,26 @@ $$
 $$
 
 
-この式は、SIA（Self-Imprint Attribution）の核心を
-**Geometry（幾何学）・Imprint（痕跡）・Attribution（自己帰属）**
-の3要素に統合した最小構造として表現したものです。
+* **Geometry**
 
-GitHub・論文・研究ログでの使用を想定し、MathJax対応形式で記述しています。
+  * $(\mathcal{S}, g_{\theta_t})$ が「Self-Space」
+  * $s_t$ はその中の「現在の自己の基点」
+
+* **Attribution**
+
+  * $R_t = - d_{g_{\theta_t}}(u_t, s_t)^2$
+    → 自己からの距離が近いほど $R_t$ は大きく（＝より「自分ごと」）
+  * $a_t = \sigma(\beta R_t)$ が **「これはどれくらい自分に関係あるか」** のスカラー
+
+* **Imprint**
+
+  * $\delta_t = u_t - s_t$ が「自己とのズレ」
+  * $T_{t+1}$ は、そのズレに $a_t$ を掛けたテンソルを **不可逆に積み上げる痕跡**
+
+* **Geometry update**
+
+  * $G(T_{t+1})$ がメトリック変形（曲率など）
+  * $H(T_{t+1}, s_t)$ が自己基点そのもののシフト
+    → 結果として **自己空間と自己位置が両方ゆがむ**
+
+
