@@ -5,7 +5,7 @@ description = "Self-Imprint Attribution framework: TraceTensor, Identity Dynamic
 authors = [{name = "Ryota Sawaki"}]
 readme = "README.md"
 requires-python = ">=3.10"
-# packages 行を削除
+# packages 行は削除したままにしてください
 
 dependencies = [
     "torch",
@@ -16,6 +16,9 @@ dependencies = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+# --- 以下のセクションを修正・追記してください ---
 [tool.setuptools.packages.find]
-where = ["."]
-
+where = ["src"]  # パッケージは src の中だけを探す
+include = ["*"]  # すべてのパッケージを含める
+exclude = ["doc", "tests", "experiments"]  # doc 等を明示的に除外
+namespaces = true # __init__.py がないフォルダもパッケージとして扱う（必要に応じて）
