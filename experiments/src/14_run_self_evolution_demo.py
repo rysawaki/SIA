@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 
-from src.utils.visualize_selfspace import SelfSpace
+from src.utils.visualize_query_deformation import SelfSpace
 from trace_extractor import TraceExtractor
-from src.utils.visualize_selfspace import visualize_self_evolution
+from src.utils.visualize_query_deformation import visualize_self_evolution
 
 
 # ====== 準備 ======

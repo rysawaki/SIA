@@ -8,7 +8,7 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.utils.visualize_selfspace import SelfSpace
+from src.utils.visualize_query_deformation import SelfSpace
 from trace_extractor import TraceExtractor
 from models.transformer_block_sia import SIATransformerBlock
 
