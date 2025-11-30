@@ -1,0 +1,16 @@
+[project]
+name = "sia"
+version = "0.1.0"
+description = "Self-Imprint Attribution framework: TraceTensor, Identity Dynamics, Self-Modulated Attention"
+authors = [{name = "Ryota Sawaki"}]
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch",
+    "numpy",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
