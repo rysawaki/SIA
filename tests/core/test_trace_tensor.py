@@ -1,7 +1,7 @@
 import torch
-from identity.core.trace_tensor import TraceTensor
+from src.identity.core.trace_tensor import TraceTensor
 
-
+# a
 def test_trace_tensor_basic_properties():
     dim = 8
     T = TraceTensor.from_dim(dim)
