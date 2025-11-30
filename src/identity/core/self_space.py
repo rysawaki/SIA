@@ -1,7 +1,4 @@
-# ============================
-# file: self_space_v3.py
-# Core SIA Component: SelfSpace v3
-# ============================
+# src/identity/core/self_space.py
 
 import torch
 import torch.nn as nn
@@ -15,11 +12,6 @@ class SelfSpace(nn.Module):
     - Trace の影響で Self の中心 self_state と Metric を同時に変形させる
     - Attention の Query を「自己の幾何学」を通して歪ませる
 
-    ポイント:
-        v1: 軸の蓄積
-        v2: Metric の導入（距離構造の変形）
-        v3: GrowthKernel 統合（Self と Metric の同時進化）
-
     Attributes:
         dim:         埋め込み次元 d
         axes:        Self を張る基底ベクトル (k, d)
@@ -30,16 +22,17 @@ class SelfSpace(nn.Module):
     """
 
     def __init__(
-        self,
-        dim: int,
-        max_axes: int = 8,
-        init_scale: float = 0.01,
-        eta_metric: float = 0.05,
-        eta_self: float = 0.1,
-        device: str = "cpu",
+            self,
+            dim: int,
+            max_axes: int = 8,
+            init_scale: float = 0.01,
+            eta_metric: float = 0.05,
+            eta_self: float = 0.1,
+            device: str = "cpu",
     ):
         super().__init__()
         self.dim = dim
+        self.latent_dim = dim  # <--- ★修正1: Engine側との互換用エイリアス
         self.max_axes = max_axes
         self.device = device
 
@@ -68,12 +61,12 @@ class SelfSpace(nn.Module):
     # ==========================================================
     @torch.no_grad()
     def update(
-        self,
-        trace: torch.Tensor,
-        shock: float,
-        affect: float,
-        sim_threshold: float = 0.7,
-        lr_axes: float = 0.2,
+            self,
+            trace: torch.Tensor,
+            shock: float,
+            affect: float,
+            sim_threshold: float = 0.7,
+            lr_axes: float = 0.2,
     ):
         """
         Trace を Self に取り込み、Self軸・Self中心・Metric を同時に更新する。
@@ -113,11 +106,11 @@ class SelfSpace(nn.Module):
     # ==========================================================
     @torch.no_grad()
     def _update_axes(
-        self,
-        trace_norm: torch.Tensor,
-        influence: float,
-        sim_threshold: float,
-        lr_axes: float,
+            self,
+            trace_norm: torch.Tensor,
+            influence: float,
+            sim_threshold: float,
+            lr_axes: float,
     ):
         """
         v1 相当の Self 軸更新部分。
@@ -160,37 +153,27 @@ class SelfSpace(nn.Module):
     def _estimate_plasticity(self, influence: float) -> float:
         """
         Self の「変形しやすさ」を簡易に推定する。
-
-        直感:
-            - strength が大きいほど、Self は固くなる（防衛・慣性）
-            - 逆に、全体の強度がまだ低いなら、柔らかく変形しやすい
-            - shock × affect が大きい経験は、それでも Self を揺らす
-
-        ここでは簡略版:
-            rigidity = mean(strength)
-            base_plasticity = 1 / (1 + rigidity)
-            plasticity = base_plasticity * influence
         """
         k = self.num_active.item()
         if k == 0:
-            return float(influence)  # まだ何もない Self は柔らかい
+            return float(influence)
 
         mean_strength = self.strength.data[:k].clamp(min=0.0).mean().item()
-        rigidity = 1.0 + mean_strength  # 防衛・慣性
-        base_plasticity = 1.0 / rigidity  # 強度が高いほど硬くなる
+        rigidity = 1.0 + mean_strength
+        base_plasticity = 1.0 / rigidity
 
         plasticity = base_plasticity * influence
-        plasticity = float(max(0.0, min(1.0, plasticity)))  # [0,1] にクリップ
+        plasticity = float(max(0.0, min(1.0, plasticity)))
         return plasticity
 
     # ==========================================================
     @torch.no_grad()
     def _growth_step(
-        self,
-        self_state: torch.Tensor,
-        metric: torch.Tensor,
-        trace_norm: torch.Tensor,
-        plasticity: float,
+            self,
+            self_state: torch.Tensor,
+            metric: torch.Tensor,
+            trace_norm: torch.Tensor,
+            plasticity: float,
     ):
         """
         GrowthKernel 本体:
@@ -206,28 +189,35 @@ class SelfSpace(nn.Module):
         outer = torch.outer(trace_norm, trace_norm)
         new_metric = metric + self.eta_metric * plasticity * outer
         # 安定性のため対角に小さな項を足す
-        new_metric = new_metric + 1e-4 * torch.eye(self.dim, device=self.device)
+        new_metric = new_metric + 1e-4 * torch.eye(self.dim, device=self.device,dtype=metric.dtype)
 
         return new_self, new_metric
 
     # ==========================================================
     def condition(
-        self,
-        Q: torch.Tensor,
-        alpha_metric: float = 0.4,
-        alpha_axes: float = 0.6,
+            self,
+            Q: torch.Tensor,
+            alpha: float = None,  # <--- ★修正2: 旧API(alpha単体)互換用引数
+            alpha_metric: float = 0.4,
+            alpha_axes: float = 0.6,
     ) -> torch.Tensor:
         """
         Query ベクトル Q を Self-Space で歪ませる。
-
-        - Metric による全体的な方向歪み（世界の見え方の傾き）
-        - axes による自己軸方向のバイアス（自分らしさ・癖）
-
-        Q: (..., d)
+        alpha が指定された場合、それを alpha_metric と alpha_axes に分配して適用する。
         """
         if self.num_active.item() == 0:
             # Self がまだ形成されていない場合は素通し
             return Q
+
+        # ★追加: alpha が渡された場合の互換処理
+        if alpha is not None:
+            # alpha=2.0 なら metric=0.8, axes=1.2 程度に分配 (0.4:0.6比率)
+            base_sum = 0.4 + 0.6
+            ratio_metric = 0.4 / base_sum
+            ratio_axes = 0.6 / base_sum
+
+            alpha_metric = alpha * ratio_metric
+            alpha_axes = alpha * ratio_axes
 
         # ---- Metric による変形 ----
         Q_metric = torch.matmul(Q, self.metric)  # (..., d)
@@ -239,14 +229,14 @@ class SelfSpace(nn.Module):
         weights = strength / strength.sum()
 
         Q_norm = F.normalize(Q, dim=-1)
-        sims = torch.matmul(Q_norm, axes.t())           # (..., k)
+        sims = torch.matmul(Q_norm, axes.t())  # (..., k)
         contrib = torch.matmul(sims * weights.unsqueeze(0), axes)  # (..., d)
 
         # ---- 統合：Self-Space での幾何学的歪み ----
         Q_new = (
-            (1.0 - alpha_metric - alpha_axes) * Q
-            + alpha_metric * Q_metric
-            + alpha_axes * contrib
+                (1.0 - alpha_metric - alpha_axes) * Q
+                + alpha_metric * Q_metric
+                + alpha_axes * contrib
         )
 
         return F.normalize(Q_new, dim=-1)
@@ -255,11 +245,7 @@ class SelfSpace(nn.Module):
     @torch.no_grad()
     def metrics(self) -> dict:
         """
-        Self-Space の状態をざっくり可視化するためのメトリクス。
-        - num_axes:     現在の Self 軸数（経験の多様性）
-        - strength_sum: Self 軸全体の強度（安定度・慣性）
-        - metric_trace: Metric のトレース（全体感度）
-        - metric_norm:  Metric のノルム（歪みの大きさ）
+        Self-Space の状態可視化用メトリクス。
         """
         k = self.num_active.item()
         strength_sum = float(self.strength.data[:k].sum()) if k > 0 else 0.0

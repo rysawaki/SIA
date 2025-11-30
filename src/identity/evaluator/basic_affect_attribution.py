@@ -1,118 +1,85 @@
 # src/identity/evaluator/basic_affect_attribution.py
 # -*- coding: utf-8 -*-
 """
-Basic Affect & Attribution Estimation (Level 1 Prototype)
+Affect & Attribution Estimation (Level 2 Prototype)
 
-SIAパイプラインの第1段階として使用する最小実装。
-- Affect（Valence / Arousal）はVADERによる感情スコアを利用
-- Attribution（自己関連度）はキーワードベースの簡易推定
-  → Level 2 以降のLLMベース判定に置き換え可能な設計
+SIAに適合する再設計:
+    - Affect = Self-spaceを変形させる力（幾何エネルギー）
+    - Attribution = Self軸との整合性（Identity一致度）
+    - VADERや辞書型スコアは使用しない
 
-責務:
-    ✔ テキストを解析して (valence, arousal, attribution) を返す
-    ✘ 幾何学変形・Trace更新・Self-space操作はしない
+アーキテクチャ:
+    ◼ LLM-based semantic scoring (静的)
+    ◼ 後で Self-aware 評価に置き換え可能な構造
 """
 
-import numpy as np
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-# Initialize VADER (英語ベースのため日本語入力は簡易的な対応に留まる)
-vader = SentimentIntensityAnalyzer()
-
-# Self-related keywords (Level 1用の最小構成。後からLLM抽出に切替可能)
-SELF_KEYWORDS = [
-    "I", "me", "my", "myself",
-    "私", "自分", "僕", "俺", "心", "感じた", "思った", "傷ついた", "孤独", "嬉しい"
-]
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-# ======================================================
-# 1. Affect 推定（Valence, Arousal）
-# ======================================================
-def estimate_affect(text: str) -> tuple[float, float]:
-    """
-    Affect (Valence, Arousal) の推定
+class AffectAttributionEvaluator:
+    def __init__(self, model_name="gpt2", device="cpu"):
+        self.device = torch.device(device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    Returns:
-        valence ∈ [-1, 1]   快–不快
-        arousal ∈ [0, 1]    感情的強度（絶対値として扱う）
+    def estimate(self, text: str) -> dict:
+        """
+        LLMに直接質問し、JSON形式で意味評価を得る。
+        解析観点:
+            - valence: 「これは自分を前に進めるか / 傷つけるか」
+            - arousal: 「どれだけ気持ちを揺さぶるか」
+            - attribution: 「これは私に関係あるか？」
+        """
+        prompt = f"""
+        You are an evaluator of meaningful experience.
+        Analyze the following text and respond in valid JSON (ONLY):
 
-    Level 1:
-        - VADERによるcompoundスコアを使用
-        - arousalは valenceの絶対値を再スケールして使う
-    """
-    scores = vader.polarity_scores(text)
-    valence = float(scores["compound"])  # [-1,1]
+        Text: "{text}"
 
-    # Arousalは「どれだけ心が動いたか」
-    arousal = float(min(1.0, abs(valence) * 1.4))  # 少し強調倍率
+        Evaluate:
+        1. valence: (-1 to +1) negative vs. positive existential impact  
+        2. arousal: (0 to 1) emotional activation level (how deeply it moves identity)  
+        3. attribution: (0 to 1) personal relevance / identity shaping potential  
 
-    return valence, arousal
+        Example format:
+        {{"valence": 0.75, "arousal": 0.62, "attribution": 0.85}}
+        """
 
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        outputs = self.model.generate(**inputs, max_new_tokens=180)
 
-# ======================================================
-# 2. Attribution 推定（自己関連性）
-# ======================================================
-def estimate_attribution(text: str) -> float:
-    """
-    Attribution（自己関連度）の簡易推定
+        return self._parse_output(outputs)
 
-    Returns:
-        attribution ∈ [0, 1]
-            0.2 : ほぼ自分と無関係
-            0.6 : ある程度自分と関連
-            1.0 : 強く自分と関係する／内的経験
+    def _parse_output(self, outputs):
+        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        try:
+            import json
+            json_str = text[text.find("{") : text.rfind("}") + 1]
+            result = json.loads(json_str)
 
-    Level 1:
-        - keywordsベースの単純判定
-        - 後で LLMベース / Context-aware 推定と置換可能
-    """
-    text_lower = text.lower()
-    count = sum(1 for w in SELF_KEYWORDS if w.lower() in text_lower)
-
-    if count == 0:
-        return 0.2
-    elif count == 1:
-        return 0.6
-    else:
-        return 1.0
-
-
-# ======================================================
-# 3. 全体まとめ（使いやすいユーティリティ）
-# ======================================================
-def evaluate_affect_and_attribution(text: str) -> dict:
-    """
-    両方の推定をまとめて実行するユーティリティ関数。
-
-    Returns:
-        {
-            "attribution": float,
-            "valence": float,
-            "arousal": float,
-        }
-    """
-    valence, arousal = estimate_affect(text)
-    attribution = estimate_attribution(text)
-
-    return {
-        "attribution": attribution,
-        "valence": valence,
-        "arousal": arousal,
-    }
+            # Safety clamp
+            return {
+                "valence": float(max(-1, min(1, result.get("valence", 0)))),
+                "arousal": float(max(0, min(1, result.get("arousal", 0)))),
+                "attribution": float(max(0, min(1, result.get("attribution", 0)))),
+            }
+        except:
+            # Safe defaults
+            return {"valence": 0.0, "arousal": 0.3, "attribution": 0.2}
 
 
-# ======================================================
-# 4. 動作確認 (単体テスト)
-# ======================================================
+# ================================
+# 単体テスト
+# ================================
 if __name__ == "__main__":
+    evaluator = AffectAttributionEvaluator()
     samples = [
-        "I felt something change in me when I saw that picture.",
-        "The mountains are covered in snow.",
-        "My heart was quietly broken that day.",
-        "This is just a random neutral sentence.",
+        "I still remember the night when I felt completely seen for the first time.",
+        "The desert looks dry and empty.",
+        "There is a well in the middle of the desert.",
     ]
 
     for s in samples:
         print(f"\nText: {s}")
-        print(evaluate_affect_and_attribution(s))
+        print(evaluator.estimate(s))
