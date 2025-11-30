@@ -8,6 +8,9 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
+import numpy as np
+
+from src.identity.core.self_space import SelfSpace
 
 def project_to_2d(vectors: torch.Tensor):
     """
@@ -154,4 +157,54 @@ def compare_before_after(Q_before, Q_after, title="Before vs After Self Update")
     plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.show()
+
+def visualize_self_evolution(self_space, traces, title="Self-Space Evolution"):
+    """
+    traces: List[torch.Tensor(d,)] の Trace シーケンス
+            各 Trace を SelfSpace.update() で反映し、
+            その都度 Self / axes / metric の進化を可視化する。
+    """
+
+    pca = PCA(n_components=2)
+    plt.figure(figsize=(8, 6))
+
+    for step, trace in enumerate(traces):
+
+        # Shock/Affect は仮に 1.0 として進化のみ観察
+        self_space.update(trace, shock=1.0, affect=1.0)
+
+        k = self_space.num_active.item()
+        axes = self_space.axes[:k].detach().cpu().numpy()
+        self_vec = self_space.self_state.detach().cpu().numpy()
+        metric = self_space.metric.detach().cpu().numpy()
+
+        # === PCA空間に射影 ===
+        data = np.vstack([axes, self_vec[np.newaxis, :]])
+        reduced = pca.fit_transform(data)
+
+        axes_2d = reduced[:-1]
+        self_2d = reduced[-1]
+
+        # ===== プロット =====
+        plt.clf()
+        plt.title(f"{title} - Step {step + 1}")
+
+        # Self axes
+        plt.scatter(axes_2d[:, 0], axes_2d[:, 1], c="tab:blue", s=60, label="Self Axes")
+
+        # Self center
+        plt.scatter(self_2d[0], self_2d[1], c="tab:red", marker="*", s=200, label="Self Center")
+
+        # 軸の強度を線の太さで示す
+        for i in range(k):
+            plt.plot([self_2d[0], axes_2d[i, 0]],
+                     [self_2d[1], axes_2d[i, 1]],
+                     color="gray",
+                     linewidth=1 + float(self_space.strength[i]) * 2)
+
+        plt.legend()
+        plt.grid(True)
+        plt.pause(0.6)
+
     plt.show()

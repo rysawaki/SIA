@@ -1,70 +1,59 @@
-# src/growth_kernel.py
+# ============================
+# file: growth_kernel.py
+# Core Transformation Kernel: GrowthKernel
+# ============================
 
 import torch
-from torch import Tensor
+import torch.nn as nn
+import torch.nn.functional as F
 
-EPS = 1e-6
 
-
-class GrowthKernel:
+class GrowthKernel(nn.Module):
     """
-    SIA Core Mechanism:
-    Imprint（気づき）を、方向性と厚みをもって育てるカーネル。
+    GrowthKernel:
+    Trace を受けた瞬間、
+    - Self の幾何学的表現 (self_state)
+    - Metric (distance / sensitivity structure)
+    を同時に変形させる「成長核」。
 
-    I_{t+1} = I_t
-              + alpha * A_t * g(||delta||)
-                * (delta ⊗ delta / ||delta||^2)
-                * h(||I_t||)
-
-    - delta: Self と Event の差（足跡の方向）
-    - A_t:   Attribution（意味の自己関連度）
+    本質:
+        Self とは位置ではなく、
+        『解釈の構造』そのものが変形する空間。
     """
 
-    def __init__(
-        self,
-        alpha: float = 0.05,
-        novelty_scale: float = 1.0,
-        saturation_center: float = 1.0,
-        device: str = "cpu",
-    ) -> None:
-        self.alpha = alpha
-        self.novelty_scale = novelty_scale
-        self.saturation_center = saturation_center
-        self.device = torch.device(device)
+    def __init__(self, dim, eta_metric=0.05, eta_self=0.1, device="cpu"):
+        super().__init__()
+        self.dim = dim
+        self.eta_metric = eta_metric  # Metric の変形率
+        self.eta_self = eta_self  # Self の変形率
+        self.device = device
 
-    def novelty_gain(self, delta_norm: Tensor) -> Tensor:
+    # ==========================================================
+    def forward(self, self_state: torch.Tensor,
+                metric: torch.Tensor,
+                trace: torch.Tensor,
+                plasticity: float):
         """
-        新規性 g(||delta||):
-        Self から遠いほど、成長ゲインを高める。
+        Self と Metric を同時に変形する核。
+
+        self_state:   (d,)   現在の自己中心
+        metric:       (d,d)  心的距離構造
+        trace:        (d,)   Traceベクトル
+        plasticity:   (0-1)  Traceを取り込める柔軟度（防衛的なら低い）
+
+        Return:
+            new_state, new_metric
         """
-        return torch.tanh(delta_norm / self.novelty_scale)
+        trace = trace.to(self.device)
+        trace_norm = F.normalize(trace, dim=-1)
 
-    def saturation_factor(self, I: Tensor) -> Tensor:
-        """
-        飽和 h(||I||_F):
-        すでに十分育っている方向では、成長を抑える。
-        """
-        frob = torch.norm(I, p="fro")
-        x = self.saturation_center - frob
-        return torch.sigmoid(x)
+        # ===== Self 更新 =====
+        new_self = self_state + self.eta_self * plasticity * trace_norm
+        new_self = F.normalize(new_self, dim=-1)
 
-    def __call__(self, delta: Tensor, I: Tensor, A_t: Tensor) -> Tensor:
-        """
-        GrowthKernel(delta, I_t, A_t) → ΔI
+        # ===== Metric 更新 (rank-1 update) =====
+        outer = torch.outer(trace_norm, trace_norm)
+        new_metric = metric + self.eta_metric * plasticity * outer
+        new_metric = new_metric + 1e-4 * torch.eye(self.dim, device=self.device)  # 安定化
 
-        delta: (d,)   Self と Event の差
-        I:     (d,d)  現在の Imprint（気づきテンソル）
-        A_t:   () or (1,)  Attribution（意味の自己関連度）
-        """
-        delta = delta.to(self.device)
-        I = I.to(self.device)
-        A_t = A_t.to(self.device)
-
-        delta_norm = torch.norm(delta) + EPS
-        dir_tensor = torch.outer(delta, delta) / (delta_norm ** 2)
-
-        g = self.novelty_gain(delta_norm)
-        h = self.saturation_factor(I)
-
-        update = self.alpha * A_t * g * h * dir_tensor
-        return update
+        return new_self, new_metric
