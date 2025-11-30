@@ -5,6 +5,7 @@ description = "Self-Imprint Attribution framework: TraceTensor, Identity Dynamic
 authors = [{name = "Ryota Sawaki"}]
 readme = "README.md"
 requires-python = ">=3.10"
+packages = [{ include = "src" }]
 
 dependencies = [
     "torch",
@@ -14,3 +15,9 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
