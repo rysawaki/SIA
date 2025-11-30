@@ -1,292 +1,206 @@
-"""
-trace_tensor.py
-
-Core implementation of TraceTensor for SIA (Self-Imprint Attribution).
-
-This module defines a geometric "trace tensor" that:
-  - Stores affective / experiential imprints as a low-rank tensor
-  - Updates over time via imprint + decay dynamics
-  - Deforms Self-space vectors to express how trace warps identity geometry
-
-The design is intentionally minimal so it can be:
-  - Plugged into Self-space modules
-  - Wrapped by Trace Tensor Attention layers
-  - Used in small 2D toy demos and high-D transformer models alike
-"""
+# src/identity/core/trace_tensor.py
 
 from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Optional
+from typing import Tuple, Optional
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch import Tensor
 
 
 @dataclass
-class TraceTensorConfig:
-    d_model: int                  # Dimensionality of Self / latent space
-    rank: int = 4                 # Number of trace modes
-    init_scale: float = 0.01      # Scale for tensor initialization
-    decay: float = 0.999          # Default decay factor for updates
-    lr_imprint: float = 0.01      # Default learning rate for imprint
-    device: Optional[str] = None
-    dtype: Optional[torch.dtype] = None
-
-
-class TraceTensor(nn.Module):
+class TraceTensor:
     """
-    TraceTensor: geometric memory of imprints in Self-space.
+    Geometric representation of 'Trace' in SIA.
 
-    T \in R^{R x d x d}  (R = rank)
-
-    Intuition:
-      - Each slice T[r] is a "trace mode" that warps Self-space.
-      - Imprints add structured outer-products (Δs ⊗ Δs) into T.
-      - Decay slowly forgets past traces but never fully erases them
-        (if decay < 1.0).
-
-    Typical usage:
-      1. Initialize with d_model (dimension of Self-space)
-      2. For each event (e_t, s_t, u_t):
-           imprint = trace_tensor.build_imprint(s_t, u_t, strength)
-           trace_tensor.update(imprint)
-      3. To see how Self is warped:
-           s_deformed = trace_tensor.deform_self(s_t)
+    - T is treated as a Riemannian-ish metric on Self-space.
+    - It should be (approximately) symmetric and (ideally) positive semi-definite.
+    - This class does NOT decide how T is updated; that is GrowthKernel / IdentityEngine の仕事。
+      ここはあくまで「構造」と「計算API」を提供する層。
     """
+    T: Tensor  # shape: (d, d)
 
-    def __init__(self, cfg: TraceTensorConfig):
-        super().__init__()
-        self.cfg = cfg
+    def __post_init__(self):
+        if self.T.dim() != 2 or self.T.size(0) != self.T.size(1):
+            raise ValueError(f"TraceTensor must be square matrix, got {self.T.shape}")
+        # 対称性を軽く保証（完全ではなく「投影」）
+        self.ensure_symmetric_()
 
-        factory_kwargs = {}
-        if cfg.device is not None:
-            factory_kwargs["device"] = cfg.device
-        if cfg.dtype is not None:
-            factory_kwargs["dtype"] = cfg.dtype
+    # ------------------------------------------------------------------
+    #  Constructors
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_dim(cls, dim: int, init_scale: float = 0.0, device=None, dtype=None) -> "TraceTensor":
+        """
+        dim 次元の TraceTensor を生成。
+        init_scale=0.0 ならゼロ行列、>0 なら小さなランダムゆらぎを持つ。
+        """
+        T = torch.zeros(dim, dim, device=device, dtype=dtype or torch.float32)
+        if init_scale > 0:
+            noise = torch.randn_like(T) * init_scale
+            T = T + 0.5 * (noise + noise.T)
+        return cls(T)
 
-        # T: (rank, d, d)
-        T = torch.randn(cfg.rank, cfg.d_model, cfg.d_model, **factory_kwargs)
-        T = T * cfg.init_scale
-        self.T = nn.Parameter(T)
+    @classmethod
+    def from_rank1(cls, u: Tensor, scale: float = 1.0) -> "TraceTensor":
+        """
+        u u^T からなるランク1 TraceTensor を生成。
+        """
+        if u.dim() != 1:
+            raise ValueError("u must be 1D vector")
+        T = scale * torch.outer(u, u)
+        return cls(T)
 
+    # ------------------------------------------------------------------
+    #  Basic properties
+    # ------------------------------------------------------------------
     @property
-    def d_model(self) -> int:
-        return self.cfg.d_model
+    def dim(self) -> int:
+        return self.T.size(0)
 
-    @property
-    def rank(self) -> int:
-        return self.cfg.rank
+    def clone(self) -> "TraceTensor":
+        return TraceTensor(self.T.clone())
 
-    @torch.no_grad()
-    def reset(self) -> None:
-        """Re-initialize trace tensor (for experiments)."""
-        self.T.data.normal_(mean=0.0, std=self.cfg.init_scale)
+    def to(self, *args, **kwargs) -> "TraceTensor":
+        return TraceTensor(self.T.to(*args, **kwargs))
 
-    @torch.no_grad()
-    def update(
-        self,
-        imprint: torch.Tensor,
-        decay: Optional[float] = None,
-        lr: Optional[float] = None,
-    ) -> None:
+    # ------------------------------------------------------------------
+    #  Symmetry / normalization
+    # ------------------------------------------------------------------
+    def ensure_symmetric_(self, alpha: float = 0.5) -> "TraceTensor":
         """
-        In-place update of trace tensor.
-
-        Args:
-            imprint: Tensor with the same shape as T (rank, d, d)
-            decay:   Exponential decay factor in (0,1]; closer to 1.0 = slower forgetting
-            lr:      Learning rate for imprint integration
+        T ← (1 - alpha) * T + alpha * (T + T^T)/2
+        alpha=1.0 で完全に対称成分だけを残す。
         """
-        if decay is None:
-            decay = self.cfg.decay
-        if lr is None:
-            lr = self.cfg.lr_imprint
+        sym = 0.5 * (self.T + self.T.T)
+        self.T = (1 - alpha) * self.T + alpha * sym
+        return self
 
-        if imprint.shape != self.T.shape:
-            raise ValueError(
-                f"Imprint shape {imprint.shape} must match trace tensor shape {self.T.shape}"
-            )
-
-        # Exponential decay + additive imprint
-        self.T.data.mul_(decay).add_(imprint, alpha=lr)
-
-    def build_imprint_from_pair(
-        self,
-        s_before: torch.Tensor,
-        s_after: torch.Tensor,
-        strength: float = 1.0,
-        normalize: bool = True,
-    ) -> torch.Tensor:
+    def normalize_spectral_(self, max_eig: float = 1.0) -> "TraceTensor":
         """
-        Build an imprint tensor from a change in Self: Δs = s_after - s_before.
+        固有値の最大値を max_eig 以下になるようスケーリング。
+        「暴走する曲率」を抑えるための簡易正則化。
+        """
+        with torch.no_grad():
+            # CPUで十分（dはそこまで大きくない前提）
+            vals = torch.linalg.eigvalsh(self.T.cpu())
+            lam_max = torch.max(torch.abs(vals))
+            if lam_max > 0:
+                scale = (max_eig / lam_max).item()
+                if scale < 1.0:
+                    self.T *= scale
+        return self
 
-        Idea:
-          - Shock or meaningful event is represented as a displacement Δs
-          - Imprint energy is proportional to outer product Δs ⊗ Δs
-          - The same Δs is broadcast to all trace modes (rank)
-
-        Args:
-            s_before: (d,) Self vector before event
-            s_after:  (d,) Self vector after event
-            strength: scalar scale for imprint energy
-            normalize: if True, normalize Δs to unit length before outer product
-
+    # ------------------------------------------------------------------
+    #  Eigen-decomposition / curvature-like quantities
+    # ------------------------------------------------------------------
+    def eigendecompose(self) -> Tuple[Tensor, Tensor]:
+        """
         Returns:
-            imprint: (rank, d, d)
+            eigenvalues: (d,)
+            eigenvectors: (d, d)  columns are eigenvectors
         """
-        if s_before.ndim != 1 or s_after.ndim != 1:
-            raise ValueError("s_before and s_after must be 1D tensors (shape: (d,))")
+        # hermitian=True で対称行列扱い
+        vals, vecs = torch.linalg.eigh(self.T)
+        return vals, vecs
 
-        delta = s_after - s_before
-        if normalize:
-            norm = delta.norm(p=2) + 1e-8
-            delta = delta / norm
-
-        # Outer product Δs ⊗ Δs -> (d, d)
-        outer = torch.ger(delta, delta) * strength  # (d, d)
-
-        # Broadcast to all rank modes
-        imprint = outer.unsqueeze(0).expand(self.rank, -1, -1).contiguous()
-        return imprint
-
-    def deform_self(self, s: torch.Tensor) -> torch.Tensor:
+    def scalar_curvature(self) -> Tensor:
         """
-        Apply trace-induced geometric deformation to Self vector.
+        簡易的な「スカラー曲率」の proxy。
+        今は単純に固有値の総和 (trace) を返す。
+        必要ならここを本格的な幾何量に置き換える。
+        """
+        return torch.trace(self.T)
 
-        We contract T over one index:
-            y_r = T[r] @ s      for each r
-          then aggregate over rank:
-            y = mean_r y_r
+    def anisotropy(self) -> Tensor:
+        """
+        空間の「ゆがみ具合」の指標。
+        ここでは (最大固有値 - 最小固有値) を返す。
+        """
+        vals, _ = self.eigendecompose()
+        return torch.max(vals) - torch.min(vals)
 
-        Args:
-            s: (d,) or (batch, d)
+    def sectional_curvature(self, u: Tensor, v: Tensor, eps: float = 1e-8) -> Tensor:
+        """
+        2つの方向 u, v に対する「断面曲率っぽいもの」を返す。
+        本物のRiemann曲率ではなく、SIA用のヒューリスティック指標。
 
+        ここでは以下のような量を返す：
+            K(u, v) = (g(u, u) * g(v, v) - g(u, v)^2) / ||u∧v||^2
+        where g(x,y) = x^T T y
+
+        u, v: (..., d)
         Returns:
-            y: same shape as s
+            K: (...,)  same batch shape
         """
-        if s.ndim == 1:
-            # (rank, d, d) x (d,) -> (rank, d)
-            y_r = torch.einsum("r i j, j -> r i", self.T, s)
-            y = y_r.mean(dim=0)
-            return y
+        # 正規化済み方向を使う
+        u = u / (u.norm(dim=-1, keepdim=True) + eps)
+        v = v / (v.norm(dim=-1, keepdim=True) + eps)
 
-        elif s.ndim == 2:
-            # (batch, d)
-            # We treat each batch element independently
-            # (b, d) -> (b, rank, d)
-            s_exp = s.unsqueeze(1)  # (b, 1, d)
-            # (rank, d, d) -> (1, rank, d, d)
-            T_exp = self.T.unsqueeze(0)  # (1, r, d, d)
+        # g(x, y) = x^T T y
+        Tu = torch.matmul(u, self.T)        # (..., d)
+        Tv = torch.matmul(v, self.T)        # (..., d)
 
-            # y[b, r, i] = sum_j T[r, i, j] * s[b, j]
-            y_br = torch.einsum("b r i j, b j -> b r i", T_exp, s_exp.squeeze(1))
-            y = y_br.mean(dim=1)  # (b, d)
-            return y
+        guu = (u * Tu).sum(dim=-1)
+        gvv = (v * Tv).sum(dim=-1)
+        guv = (u * Tv).sum(dim=-1)
 
-        else:
-            raise ValueError("s must have shape (d,) or (batch, d)")
-
-    def forward(self, s: torch.Tensor) -> torch.Tensor:
-        """
-        Alias for deform_self so it can be used as a nn.Module in pipelines.
-
-        Example:
-            trace = TraceTensor(cfg)
-            s_deformed = trace(s)
-        """
-        return self.deform_self(s)
-
-
-# --- Simple 2D demo utilities (for experiments / notebooks) ---
-
-def demo_build_trace_and_deform_2d(
-    steps: int = 5,
-    strength: float = 1.0,
-    seed: int = 42,
-):
-    """
-    Minimal 2D toy example:
-      - Self-space is 2D
-      - We generate a line of Self states and treat them as successive updates
-      - After accumulating trace, we deform a grid to visualize the warp
-
-    This function is intended for use in notebooks / scripts, not as a training loop.
-    """
-    import math
-    import matplotlib.pyplot as plt
-
-    torch.manual_seed(seed)
-
-    cfg = TraceTensorConfig(d_model=2, rank=4, init_scale=0.0)
-    trace = TraceTensor(cfg)
-
-    # 1. Generate a simple trajectory in Self-space
-    s_list = []
-    for t in range(steps + 1):
-        angle = 2 * math.pi * t / steps
-        s = torch.tensor([math.cos(angle), math.sin(angle)], dtype=torch.float32)
-        s_list.append(s)
-
-    # 2. Accumulate imprints along the trajectory
-    for t in range(steps):
-        s_before = s_list[t]
-        s_after = s_list[t + 1]
-        imprint = trace.build_imprint_from_pair(
-            s_before, s_after, strength=strength, normalize=True
+        wedge_norm2 = torch.clamp(
+            (u * u).sum(dim=-1) * (v * v).sum(dim=-1) - (u * v).sum(dim=-1) ** 2,
+            min=eps,
         )
-        trace.update(imprint)
 
-    # 3. Visualize how the trace deforms a grid
-    grid_lin = torch.linspace(-1.5, 1.5, steps * 4)
-    xs, ys = torch.meshgrid(grid_lin, grid_lin, indexing="xy")
-    points = torch.stack([xs.reshape(-1), ys.reshape(-1)], dim=-1)  # (N, 2)
+        K = (guu * gvv - guv ** 2) / wedge_norm2
+        return K
 
-    with torch.no_grad():
-        deformed = trace(points)  # (N, 2)
+    # ------------------------------------------------------------------
+    #  Metric / distance / energy
+    # ------------------------------------------------------------------
+    def metric(self, v: Tensor) -> Tensor:
+        """
+        g(v, v) = v^T T v
+        v: (..., d)
+        Returns:
+            (...,)  metric value
+        """
+        Tv = torch.matmul(v, self.T)       # (..., d)
+        return (v * Tv).sum(dim=-1)
 
-    x_orig = points[:, 0].reshape(xs.shape)
-    y_orig = points[:, 1].reshape(ys.shape)
-    x_def = deformed[:, 0].reshape(xs.shape)
-    y_def = deformed[:, 1].reshape(ys.shape)
+    def bilinear(self, u: Tensor, v: Tensor) -> Tensor:
+        """
+        g(u, v) = u^T T v
+        """
+        Tv = torch.matmul(v, self.T)
+        return (u * Tv).sum(dim=-1)
 
-    plt.figure(figsize=(6, 6))
-    # Plot original grid as light lines
-    for i in range(xs.shape[0]):
-        plt.plot(x_orig[i].numpy(), y_orig[i].numpy(), linewidth=0.5, alpha=0.3)
-        plt.plot(x_orig[:, i].numpy(), y_orig[:, i].numpy(), linewidth=0.5, alpha=0.3)
+    def distance(self, q: Tensor, k: Tensor) -> Tensor:
+        """
+        d_T(q, k)^2 = (q - k)^T T (q - k)
+        q, k: (..., d)
+        Returns:
+            (...,)  squared distance
+        """
+        diff = q - k
+        return self.metric(diff)
 
-    # Plot deformed grid
-    for i in range(xs.shape[0]):
-        plt.plot(x_def[i].numpy(), y_def[i].numpy(), linewidth=1.0)
-        plt.plot(x_def[:, i].numpy(), y_def[:, i].numpy(), linewidth=1.0)
+    # ------------------------------------------------------------------
+    #  Update primitives (GrowthKernel から呼ばれることを想定)
+    # ------------------------------------------------------------------
+    def add_rank1_(self, u: Tensor, strength: float = 1.0) -> "TraceTensor":
+        """
+        T ← T + strength * u u^T
+        Shock を受けた方向 u に沿って曲率を追加するイメージ。
+        """
+        if u.dim() != 1 or u.size(0) != self.dim:
+            raise ValueError(f"u must be shape ({self.dim},), got {u.shape}")
+        self.T = self.T + strength * torch.outer(u, u)
+        self.ensure_symmetric_()
+        return self
 
-    plt.scatter(
-        [s[0].item() for s in s_list],
-        [s[1].item() for s in s_list],
-        s=20,
-    )
-    plt.gca().set_aspect("equal", adjustable="box")
-    plt.title("TraceTensor 2D Grid Deformation Demo")
-    plt.xlabel("Self dim 1")
-    plt.ylabel("Self dim 2")
-    plt.grid(True, alpha=0.2)
-    plt.tight_layout()
-    return trace
-
-
-if __name__ == "__main__":
-    # Simple smoke test
-    cfg = TraceTensorConfig(d_model=4)
-    trace = TraceTensor(cfg)
-
-    s_before = torch.randn(4)
-    s_after = s_before + 0.5 * torch.randn(4)
-    imprint = trace.build_imprint_from_pair(s_before, s_after, strength=1.0)
-    trace.update(imprint)
-
-    s = torch.randn(4)
-    y = trace(s)
-    print("s:", s)
-    print("y (deformed):", y)
+    def decay_(self, lam: float) -> "TraceTensor":
+        """
+        T ← lam * T
+        lam in (0,1] で、Traceエネルギーを徐々に減衰させる。
+        """
+        self.T = lam * self.T
+        return self
