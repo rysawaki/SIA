@@ -157,8 +157,7 @@ class SIASystem_v6_1(nn.Module):
 
     def forward(self, x, target=None):
         B = x.shape[0]
-        x_flat = x.view(B, -1)
-
+        x_flat = x.reshape(B, -1)
         # --- A. Metabolism (Rule Update) ---
         genome = self.trace.read()
         new_G, new_mu = self.kernel.evolve_geometry(genome)
