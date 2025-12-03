@@ -1,295 +1,267 @@
-import math
-import statistics
-import os
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 
-# ============================================================
-# 1. Config
-# ============================================================
-
-@dataclass
-class MiniSIAConfig:
-    obs_dim: int = 2
-    h_dim: int = 8
-    affect_dim: int = 4
-
-    # Trace parameters
-    trace_decay: float = 0.95
-    trace_lr: float = 0.1
-
-    # Self parameters
-    h_lr: float = 0.05
-    max_h_norm: float = 5.0
-    max_action: float = 0.2
-
-    # gains (to be overwritten inside scan)
-    alpha_past: float = 0.4
-    beta_present: float = 0.8
-    gamma_future: float = 0.6
-
-    # simulation
-    steps_per_episode: int = 80
-    n_episodes: int = 1
-
-
-# ============================================================
-# 2. Environment
-# ============================================================
-
-class MiniLineEnv:
-    def __init__(self, max_steps: int = 80):
-        self.max_steps = max_steps
-        self.x = 0.0
-        self.goal = 1.0
-        self.step_count = 0
-
-    def reset(self):
-        self.x = float(torch.rand(1).item() * 0.5)
-        self.step_count = 0
-        return self._get_obs()
-
-    def _get_obs(self):
-        return torch.tensor([self.x, self.goal], dtype=torch.float32)
-
-    def step(self, action: float):
-        self.step_count += 1
-        self.x += action
-        self.x = max(0.0, min(1.0, self.x))
-
-        obs = self._get_obs()
-        dist = abs(self.goal - self.x)
-        reward = -dist
-
-        done = (dist < 0.01) or (self.step_count >= self.max_steps)
-        return obs, reward, done, {"dist_to_goal": dist}
-
-
-# ============================================================
-# 3. Modules
-# ============================================================
-
-class ShockModule(nn.Module):
-    def __init__(self, obs_dim: int):
-        super().__init__()
-        self.obs_dim = obs_dim
-
-    def forward(self, obs, prev_obs):
-        if prev_obs is None:
-            return torch.zeros_like(obs)
-        return obs - prev_obs
-
-
-class AffectModule(nn.Module):
-    def __init__(self, obs_dim: int, affect_dim: int):
-        super().__init__()
-        self.fc = nn.Linear(obs_dim, affect_dim)
-
-    def forward(self, shock):
-        return torch.tanh(self.fc(shock))
-
-
-class TraceModule(nn.Module):
-    def __init__(self, affect_dim, h_dim, cfg: MiniSIAConfig):
-        super().__init__()
-        self.decay = cfg.trace_decay
-        self.lr = cfg.trace_lr
-
-    def forward(self, affect, h, trace_prev):
-        imprint = torch.ger(affect, h)
-        return self.decay * trace_prev + self.lr * imprint
-
-
-class SelfModule(nn.Module):
+# ===============================================================
+# 0. Environment (1D Miniworld)
+# ===============================================================
+class MiniEnv1D:
     """
-    h(t+1) = h(t) + h_lr * tanh( α * Past + β * Present + γ * Future )
+    1D世界： エージェントは位置 pos を持ち、目標 goal に近づく
+    観測: [pos, goal-pos, velocity]
+    行動: -1, 0, +1
     """
-    def __init__(self, affect_dim, h_dim, cfg: MiniSIAConfig):
-        super().__init__()
-        trace_flat = affect_dim * h_dim
-        self.cfg = cfg
 
-        self.fc_past = nn.Linear(trace_flat, h_dim)
-        self.fc_present = nn.Linear(affect_dim, h_dim)
-        self.fc_future = nn.Linear(1, h_dim)
-        self.fc_action = nn.Linear(h_dim, 1)
-
-    def forward(self, affect, trace, future_signal, h_prev):
-        trace_flat = trace.view(-1)
-        past = self.fc_past(trace_flat)
-        present = self.fc_present(affect)
-        future = self.fc_future(future_signal)
-
-        u = (
-            self.cfg.alpha_past * past +
-            self.cfg.beta_present * present +
-            self.cfg.gamma_future * future
-        )
-
-        delta_h = torch.tanh(u)
-        h = h_prev + self.cfg.h_lr * delta_h
-
-        # norm constraint
-        norm_h = torch.norm(h)
-        if norm_h > self.cfg.max_h_norm:
-            h = h * (self.cfg.max_h_norm / (norm_h + 1e-8))
-
-        action = torch.tanh(self.fc_action(h))[0] * self.cfg.max_action
-        return h, action
-
-
-# ============================================================
-# 4. Agent
-# ============================================================
-
-class MiniSIAAgent:
-    def __init__(self, cfg: MiniSIAConfig):
-        self.cfg = cfg
-        self.shock_module = ShockModule(cfg.obs_dim)
-        self.affect_module = AffectModule(cfg.obs_dim, cfg.affect_dim)
-        self.trace_module = TraceModule(cfg.affect_dim, cfg.h_dim, cfg)
-        self.self_module = SelfModule(cfg.affect_dim, cfg.h_dim, cfg)
-
+    def __init__(self):
         self.reset()
 
     def reset(self):
-        self.h = torch.zeros(self.cfg.h_dim)
-        self.trace = torch.zeros(self.cfg.affect_dim, self.cfg.h_dim)
-        self.prev_obs = None
+        self.pos = torch.randn(1).item() * 0.5
+        self.goal = torch.randn(1).item() * 2.0
+        self.vel = 0.0
+        return self._obs()
 
-    def step(self, obs):
-        # shock
-        shock = self.shock_module(obs, self.prev_obs)
+    def _obs(self):
+        return torch.tensor([self.pos, self.goal - self.pos, self.vel], dtype=torch.float32)
 
-        # affect
-        affect = self.affect_module(shock)
+    def step(self, action):
+        # action ∈ {-1, 0, 1}
+        self.vel = 0.8 * self.vel + 0.2 * action
+        self.pos += self.vel
 
-        # trace update
-        self.trace = self.trace_module(affect, self.h, self.trace)
+        obs = self._obs()
+        reward = -abs(self.goal - self.pos)
+        done = abs(self.goal - self.pos) < 0.05
 
-        # future signal
-        position, goal = obs[0], obs[1]
-        future_signal = torch.tensor([goal - position], dtype=torch.float32)
-
-        # self update
-        self.h, action = self.self_module(affect, self.trace, future_signal, self.h)
-        self.prev_obs = obs.clone()
-
-        metrics = {
-            "h_norm": torch.norm(self.h).item(),
-            "trace_norm": torch.norm(self.trace).item(),
-            "affect_norm": torch.norm(affect).item(),
-            "action": float(action.item()),
-        }
-        return action.item(), metrics
+        return obs, reward, done
 
 
-# ============================================================
-# 5. Run single simulation
-# ============================================================
+# ===============================================================
+# 1. Hybrid Trace Module (Oja + Full Hebbian)
+# ===============================================================
+class HybridTrace(nn.Module):
+    """
+    mode = 'oja'  : Rank-1 主成分（Oja's Rule）
+    mode = 'full' : Full Hebbian 行列
+    """
 
-def run_single_sim(cfg: MiniSIAConfig):
-    env = MiniLineEnv(cfg.steps_per_episode)
-    agent = MiniSIAAgent(cfg)
+    def __init__(self, d_model, mode='oja', lr=0.05):
+        super().__init__()
+        self.d_model = d_model
+        self.mode = mode  # 'oja' or 'full'
+        self.lr = lr
 
-    obs = env.reset()
-    agent.reset()
+        # Rank-1 (Oja): 主成分ベクトル v
+        self.register_buffer('v', F.normalize(torch.randn(d_model), dim=0))
 
-    h_vals = []
-    trace_vals = []
-    affect_vals = []
-    actions = []
+        # Full-Rank (Hebbian): 共分散行列 M
+        self.register_buffer('M', torch.zeros(d_model, d_model))
 
-    for step in range(cfg.steps_per_episode):
+    def get_energy(self, affect: torch.Tensor) -> torch.Tensor:
+        """
+        共鳴エネルギーを計算
+        mode='oja' : E = (v^T x)^2
+        mode='full': E = x^T M x
+        """
+        if self.mode == 'oja':
+            proj = torch.dot(self.v, affect)
+            return proj * proj  # (v^T x)^2
+
+        elif self.mode == 'full':
+            x = affect.unsqueeze(0)        # (1, d)
+            energy = (x @ self.M @ x.t()).squeeze()  # scalar
+            return energy
+
+        else:
+            raise ValueError(f"Unknown trace mode: {self.mode}")
+
+    def update(self, affect: torch.Tensor):
+        """
+        記憶更新（不可逆）
+        affect = Shock後の情動ベクトル
+        """
         with torch.no_grad():
-            action, metrics = agent.step(obs)
+            if self.mode == 'oja':
+                # Oja's Rule: v ← v + lr * y * (x - y v)
+                y = torch.dot(self.v, affect)
+                delta = y * (affect - y * self.v)
+                self.v += self.lr * delta
+                self.v = F.normalize(self.v, dim=0)
 
-        obs, reward, done, info = env.step(action)
+            elif self.mode == 'full':
+                # Hebbian: M ← decay*M + lr * (x x^T)
+                self.M *= 0.95  # 忘却（古い痕跡が少しずつ薄れる）
+                delta = torch.ger(affect, affect)
+                self.M += self.lr * delta
 
-        h_vals.append(metrics["h_norm"])
-        trace_vals.append(metrics["trace_norm"])
-        affect_vals.append(metrics["affect_norm"])
-        actions.append(metrics["action"])
+            else:
+                raise ValueError(f"Unknown trace mode: {self.mode}")
+
+    def get_distortion_vector(self, affect: torch.Tensor) -> torch.Tensor:
+        """
+        トラウマによる歪みベクトル
+        mode='oja'  : v 方向に引き寄せ
+        mode='full' : M x による複雑な歪み
+        """
+        if self.mode == 'oja':
+            y = torch.dot(self.v, affect)
+            return y * self.v
+
+        elif self.mode == 'full':
+            return self.M @ affect
+
+        else:
+            raise ValueError(f"Unknown trace mode: {self.mode}")
+
+
+# ===============================================================
+# 2. SIA Params / State
+# ===============================================================
+class SIAParams(nn.Module):
+    def __init__(self, d_model=32, obs_dim=3):
+        super().__init__()
+        self.d_model = d_model
+
+        # obs → embedding (x_t)
+        self.obs_proj = nn.Linear(obs_dim, d_model)
+
+        # Shock → Affect
+        self.shock_proj = nn.Linear(d_model, d_model)
+        self.affect_weight = nn.Parameter(torch.randn(d_model))
+
+        # Self 更新
+        self.W_h = nn.Linear(d_model, d_model)
+
+        # Gate パラメータ（調整済み）
+        self.flashback_gain = 5.0
+        self.gate_sharpness = 7.0
+        self.threshold = 0.75  # cos^2 ≈ 0.75 → cos ≈ 0.86 程度
+
+        # 行動決定
+        self.action_head = nn.Linear(d_model, 3)
+
+    def embed(self, obs):
+        return torch.tanh(self.obs_proj(obs))
+
+    def shock(self, x):
+        return torch.tanh(self.shock_proj(x))
+
+    def affect(self, shock):
+        return shock * torch.tanh(self.affect_weight)
+
+
+class SIAState:
+    def __init__(self, d_model):
+        self.h = torch.zeros(d_model)
+
+    def reset(self):
+        self.h.zero_()
+
+
+# ===============================================================
+# 3. SIA Core with Resonance
+# ===============================================================
+class SIAResonanceCore:
+    def __init__(self, params: SIAParams, state: SIAState, trace: HybridTrace):
+        self.params = params
+        self.state = state
+        self.trace = trace
+
+        # 不応期管理
+        self.refractory_timer = 0
+        self.refractory_limit = 5
+
+    def step(self, obs: torch.Tensor):
+        p = self.params
+        s = self.state
+        t = self.trace
+
+        # 1. Perception → Shock → Affect
+        x_t = p.embed(obs)
+        shock = p.shock(x_t)
+        affect = p.affect(shock)
+
+        # 2. Resonance Check
+        energy = t.get_energy(affect)  # scalar
+
+        if t.mode == 'full':
+            trace_norm = torch.norm(t.M) + 1e-6
+            resonance = energy / trace_norm
+        else:  # 'oja'
+            # Rank-1: energy = (v^T x)^2 をそのまま使う（強い共鳴だけ反応）
+            resonance = energy
+
+        # 3. Gate（不応期付き）
+        raw_gate = torch.sigmoid(p.gate_sharpness * (resonance - p.threshold))
+
+        if self.refractory_timer > 0:
+            gate = torch.tensor(0.0)
+            self.refractory_timer -= 1
+        else:
+            gate = raw_gate
+            if gate > 0.5:
+                self.refractory_timer = self.refractory_limit
+
+        # 4. Self 更新（h）
+        h_decay = 0.9
+        h_rational = torch.tanh(p.W_h(s.h) + x_t)
+
+        distortion = t.get_distortion_vector(affect)
+        mixed_input = x_t + gate * p.flashback_gain * distortion
+
+        h_new = torch.tanh(p.W_h(h_decay * s.h) + mixed_input)
+
+        with torch.no_grad():
+            s.h = h_new
+
+        # 5. Trace 更新（感情＋ゲート依存）
+        # 共鳴が強いほど（gateが大きいほど）深く刻まれる
+        t.lr = 0.02 + 0.08 * gate.item()
+        t.update(affect)
+
+        # 6. 行動決定
+        logits = p.action_head(s.h)
+        action = torch.argmax(logits).item() - 1  # {-1,0,+1}
+
+        return action, float(resonance), float(gate), float(torch.norm(s.h))
+
+
+# ===============================================================
+# 4. Demo: 1D Miniworld × Hybrid SIA
+# ===============================================================
+def demo_miniworld_hybrid():
+    torch.manual_seed(0)
+
+    # モード切替: 'oja' (単一トラウマ) or 'full' (多方向トラウマ)
+    MODE = 'oja'   # 'full' に変えて比較しても良い
+
+    env = MiniEnv1D()
+    obs = env.reset()
+
+    d = 32
+    params = SIAParams(d_model=d, obs_dim=3)
+    state = SIAState(d_model=d)
+    trace = HybridTrace(d_model=d, mode=MODE, lr=0.05)
+    sia = SIAResonanceCore(params, state, trace)
+
+    print(f"=== 1D Miniworld × SIA HybridTrace (mode={MODE}) ===")
+    print(f"Initial pos={env.pos:.2f}, goal={env.goal:.2f}")
+
+    for t in range(50):
+        action, res, gate, h_norm = sia.step(obs)
+        obs, reward, done = env.step(action)
+
+        print(
+            f"t={t:02d} | pos={env.pos:.2f} | act={action:+d} "
+            f"| res={res:.3f} | gate={gate:.2f} | h={h_norm:.2f}"
+            + ("  <FLASHBACK>" if gate > 0.6 else "")
+        )
 
         if done:
+            print("Goal reached!")
             break
 
-    max_h = max(h_vals)
-    max_trace = max(trace_vals)
-    var_action = statistics.pvariance(actions) if len(actions) > 1 else 0.0
-    final_dist = info["dist_to_goal"]
-    steps = step + 1
-
-    return {
-        "max_h": max_h,
-        "max_trace": max_trace,
-        "var_action": var_action,
-        "steps": steps,
-        "final_dist": final_dist,
-    }
-
-
-# ============================================================
-# 6. Scan parameter space
-# ============================================================
-
-def scan_sia_parameter_space():
-    cfg = MiniSIAConfig()
-
-    alphas = [0.0, 0.3, 0.6, 1.0, 1.5]
-    betas  = [0.0, 0.3, 0.6, 1.0, 1.5]
-    gammas = [0.0, 0.3, 0.6, 1.0, 1.5]
-
-    results = {}
-
-    for a in alphas:
-        for b in betas:
-            for g in gammas:
-                cfg.alpha_past = a
-                cfg.beta_present = b
-                cfg.gamma_future = g
-
-                r = run_single_sim(cfg)
-                results[(a, b, g)] = r
-                print(f"[α={a}, β={b}, γ={g}]  ->  {r}")
-
-    os.makedirs("figs", exist_ok=True)
-
-    # create heatmaps for each α
-    for i, a in enumerate(alphas):
-        heat = np.zeros((len(betas), len(gammas)))
-
-        for ib, b in enumerate(betas):
-            for ig, g in enumerate(gammas):
-                r = results[(a, b, g)]
-                instability = (
-                    r["max_h"] +
-                    r["var_action"] * 10.0 +
-                    r["max_trace"] * 0.3
-                )
-                heat[ib, ig] = instability
-
-        plt.figure(figsize=(6, 5))
-        plt.imshow(heat, cmap="hot", origin="lower", extent=[0, 1, 0, 1])
-        plt.colorbar(label="Instability")
-        plt.title(f"Instability Map (α={a})")
-        plt.xlabel("γ (future)")
-        plt.ylabel("β (present)")
-        plt.tight_layout()
-        plt.savefig(f"figs/instability_alpha_{a}.png")
-        plt.close()
-
-    print("\n=== Saved heatmaps to ./figs/ ===")
-
-
-# ============================================================
-# main
-# ============================================================
 
 if __name__ == "__main__":
-    scan_sia_parameter_space()
+    demo_miniworld_hybrid()
