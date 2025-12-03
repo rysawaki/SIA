@@ -1,236 +1,163 @@
-import math
-import statistics
-from dataclasses import dataclass
-
 import numpy as np
-import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LogisticRegression
+from itertools import product
+import torch
+
+# ----------------------------------------------------------
+# Mini-SIA dynamics (あなたの元コードに合わせて簡略化)
+# ----------------------------------------------------------
+def run_episode(alpha, beta, gamma, episode_len=80):
+    h = 0.0
+    trace = 0.0
+    instability = 0.0
+
+    for t in range(episode_len):
+        # affect
+        A = beta * abs(h)
+
+        # future drive
+        F = gamma * (1.0 - abs(h))
+
+        # past drag
+        P = alpha * trace
+
+        # update h
+        dh = 0.1 * (A + F - P)
+        h = h + dh
+        h = np.clip(h, -5.0, 5.0)
+
+        # trace update
+        trace = 0.9 * trace + 0.1 * h
+
+        # accumulate instability
+        instability += abs(h) + abs(trace)
+
+    return instability
 
 
-# ============================================================
-# 1. Mini-SIA Config
-# ============================================================
-
-@dataclass
-class MiniSIAConfig:
-    obs_dim: int = 2
-    h_dim: int = 8
-    affect_dim: int = 4
-
-    trace_decay: float = 0.95
-    trace_lr: float = 0.1
-
-    h_lr: float = 0.05
-    max_h_norm: float = 5.0
-    max_action: float = 0.2
-
-    alpha_past: float = 0.4
-    beta_present: float = 0.8
-    gamma_future: float = 0.6
-
-    steps_per_episode: int = 80
+def get_I_mean(alpha, beta, gamma, n_episodes=10):
+    values = [run_episode(alpha, beta, gamma) for _ in range(n_episodes)]
+    return np.mean(values), np.std(values)
 
 
-# ============================================================
-# 2. Environment
-# ============================================================
+# ----------------------------------------------------------
+# Generate dataset
+# ----------------------------------------------------------
+alpha_list = [0.0, 0.5, 1.0, 1.5]
+beta_list  = [0.0, 0.5, 1.0, 1.5]
+gamma_list = [0.0, 0.5, 1.0, 1.5]
 
-class MiniLineEnv:
-    def __init__(self, max_steps: int = 80):
-        self.max_steps = max_steps
+data = []
+labels = []
 
-    def reset(self):
-        self.x = float(torch.rand(1).item() * 0.5)
-        self.goal = 1.0
-        self.step_count = 0
-        return self._get_obs()
+I_crit = 4.0  # 崩壊とみなす閾値。必要なら調整可
 
-    def _get_obs(self):
-        return torch.tensor([self.x, self.goal], dtype=torch.float32)
+print("\n=== Running 10-episode averaged instability ===")
 
-    def step(self, action: float):
-        self.step_count += 1
-        self.x += float(action)
-        self.x = max(0.0, min(1.0, self.x))
+for a, b, g in product(alpha_list, beta_list, gamma_list):
+    I_mean, I_std = get_I_mean(a, b, g, n_episodes=10)
+    print(f"(α={a}, β={b}, γ={g}) → I_mean={I_mean:.3f} (std={I_std:.3f})")
 
-        obs = self._get_obs()
-        dist = abs(self.goal - self.x)
-        reward = -dist
+    # 入力特徴
+    data.append([a, b, g])
+    # 崩壊ラベル
+    labels.append(1 if I_mean >= I_crit else 0)
 
-        done = (dist < 0.01) or (self.step_count >= self.max_steps)
-        info = {"dist": dist}
-        return obs, reward, done, info
+data = np.array(data)
+labels = np.array(labels)
+
+# ----------------------------------------------------------
+# Logistic regression with polynomial features
+# f(a,b,g) = w0 + w1 a + w2 b + w3 g + ... + w9 g^2
+# ----------------------------------------------------------
+def poly_features(X):
+    out = []
+    for a, b, g in X:
+        out.append([
+            1,
+            a, b, g,
+            a*a, a*b, a*g,
+            b*b, b*g,
+            g*g
+        ])
+    return np.array(out)
+
+X = poly_features(data)
+clf = LogisticRegression(max_iter=5000)
+clf.fit(X, labels)
+
+coef = clf.coef_[0]
+intercept = clf.intercept_[0]
+
+print("\n=== Logistic regression polynomial model ===")
+names = [
+    "1", "alpha", "beta", "gamma",
+    "alpha^2", "alpha*beta", "alpha*gamma",
+    "beta^2", "beta*gamma", "gamma^2"
+]
+
+for n, c in zip(names, coef):
+    print(f"{n}: {c:.4f}")
+
+print(f"intercept: {intercept:.4f}")
+
+# ----------------------------------------------------------
+# Boundary function f(a,b,g)=0 を返す関数
+# ----------------------------------------------------------
+def f_boundary(a, b, g):
+    """
+    a: float（スカラー）
+    b, g: numpy 2D meshgrid（同じ shape）
+    出力: Z（同じ shape）
+    """
+    # スカラーを b,g と同じ shape に broadcast
+    A = a * np.ones_like(b)
+
+    # 多項式項（すべて配列として計算される）
+    term1 = coef[0] * 1
+    term2 = coef[1] * A
+    term3 = coef[2] * b
+    term4 = coef[3] * g
+    term5 = coef[4] * (A * A)
+    term6 = coef[5] * (A * b)
+    term7 = coef[6] * (A * g)
+    term8 = coef[7] * (b * b)
+    term9 = coef[8] * (b * g)
+    term10 = coef[9] * (g * g)
+
+    return term1 + term2 + term3 + term4 + term5 + term6 + term7 + term8 + term9 + term10 + intercept
 
 
-# ============================================================
-# 3. SIA Modules
-# ============================================================
 
-class Shock(nn.Module):
-    def forward(self, obs, prev):
-        return torch.zeros_like(obs) if prev is None else obs - prev
+# ----------------------------------------------------------
+# Plot slices for α = fixed
+# ----------------------------------------------------------
+def plot_slices():
+    fig, axes = plt.subplots(1, 4, figsize=(22, 5))
 
+    for idx, a in enumerate(alpha_list):
+        ax = axes[idx]
 
-class Affect(nn.Module):
-    def __init__(self, obs_dim, affect_dim):
-        super().__init__()
-        self.fc = nn.Linear(obs_dim, affect_dim)
-
-    def forward(self, x):
-        return torch.tanh(self.fc(x))
-
-
-class TraceM(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-    def forward(self, aff, h, T):
-        return self.cfg.trace_decay * T + self.cfg.trace_lr * torch.ger(aff, h)
-
-
-class SelfM(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.fc_p = nn.Linear(cfg.affect_dim * cfg.h_dim, cfg.h_dim)
-        self.fc_a = nn.Linear(cfg.affect_dim, cfg.h_dim)
-        self.fc_f = nn.Linear(1, cfg.h_dim)
-        self.fc_act = nn.Linear(cfg.h_dim, 1)
-
-    def forward(self, aff, T, fut, h_prev):
-        trace_flat = T.view(-1)
-        u = (
-            self.cfg.alpha_past * self.fc_p(trace_flat)
-            + self.cfg.beta_present * self.fc_a(aff)
-            + self.cfg.gamma_future * self.fc_f(fut)
+        B, G = np.meshgrid(
+            np.linspace(0, 1.5, 100),
+            np.linspace(0, 1.5, 100)
         )
-        dh = torch.tanh(u)
-        h = h_prev + self.cfg.h_lr * dh
-        n = h.norm()
-        if n > self.cfg.max_h_norm:
-            h = h * self.cfg.max_h_norm / (n + 1e-8)
+        Z = f_boundary(a, B, G)
 
-        act = torch.tanh(self.fc_act(h))[0] * self.cfg.max_action
-        return h, act
+        cs = ax.contour(B, G, Z, levels=[0.0], colors="red", linewidths=2)
 
+        ax.set_title(f"α={a}")
+        ax.set_xlabel("β")
+        ax.set_ylabel("γ")
+        ax.imshow(Z, extent=[0,1.5,0,1.5], origin="lower",
+                  cmap="coolwarm", alpha=0.5)
 
-# ============================================================
-# 4. Agent + Single Episode
-# ============================================================
-
-class MiniSIAAgent:
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.sh = Shock()
-        self.af = Affect(cfg.obs_dim, cfg.affect_dim)
-        self.tr = TraceM(cfg)
-        self.se = SelfM(cfg)
-        self.reset()
-
-    def reset(self):
-        self.h = torch.zeros(self.cfg.h_dim)
-        self.T = torch.zeros(self.cfg.affect_dim, self.cfg.h_dim)
-        self.prev = None
-
-    def step(self, obs):
-        shock = self.sh(obs, self.prev)
-        aff = self.af(shock)
-        self.T = self.tr(aff, self.h, self.T)
-
-        fut = torch.tensor([obs[1] - obs[0]])
-        self.h, act = self.se(aff, self.T, fut, self.h)
-
-        self.prev = obs.clone()
-
-        return float(act), self.h.norm().item(), self.T.norm().item()
+    plt.suptitle("Boundary surface slices: f(α,β,γ)=0")
+    plt.tight_layout()
+    plt.show()
 
 
-def run_episode(cfg: MiniSIAConfig):
-    env = MiniLineEnv(cfg.steps_per_episode)
-    agent = MiniSIAAgent(cfg)
+plot_slices()
 
-    obs = env.reset()
-    agent.reset()
-
-    h_vals = []
-    T_vals = []
-    acts = []
-
-    for step in range(cfg.steps_per_episode):
-        with torch.no_grad():
-            act, h_norm, T_norm = agent.step(obs)
-
-        obs, _, done, info = env.step(act)
-
-        h_vals.append(h_norm)
-        T_vals.append(T_norm)
-        acts.append(act)
-
-        if done:
-            break
-
-    max_h = max(h_vals)
-    max_T = max(T_vals)
-    var_a = statistics.pvariance(acts) if len(acts) > 1 else 0.0
-
-    I = max_h + 0.3 * max_T + 10 * var_a
-    return I
-
-
-# ============================================================
-# 5. 10 エピソード平均版 I
-# ============================================================
-
-def run_10_episode_avg_I(alpha, beta, gamma, cfg_base: MiniSIAConfig):
-    cfg = MiniSIAConfig(**vars(cfg_base))
-    cfg.alpha_past = alpha
-    cfg.beta_present = beta
-    cfg.gamma_future = gamma
-
-    Is = []
-    for _ in range(10):
-        I = run_episode(cfg)
-        Is.append(I)
-
-    return {
-        "alpha": alpha,
-        "beta": beta,
-        "gamma": gamma,
-        "I_mean": np.mean(Is),
-        "I_std": np.std(Is),
-    }
-
-
-# ============================================================
-# 6. Scan 全点 (α,β,γ)
-# ============================================================
-
-def scan_all_points():
-    cfg_base = MiniSIAConfig()
-    vals = [0.0, 0.5, 1.0, 1.5]
-
-    results = []
-
-    for a in vals:
-        for b in vals:
-            for g in vals:
-                r = run_10_episode_avg_I(a, b, g, cfg_base)
-                results.append(r)
-                print(f"(α={a}, β={b}, γ={g})  →  I_mean={r['I_mean']:.3f}  (std={r['I_std']:.3f})")
-
-    return results
-
-
-# ============================================================
-# main
-# ============================================================
-
-if __name__ == "__main__":
-    results = scan_all_points()
-
-    # 結果をテーブル形式で確認したい場合
-    print("\n=== Final Table (10-episode averaged I) ===")
-    for r in results:
-        print(r)
+print("\n=== Finished ===")
