@@ -1,6 +1,6 @@
 import torch
 from src.identity.core.trace_tensor import TraceTensor
-from src.identity.dynamics.growth_kernel import GrowthKernel
+from design_graveyard.growth_kernel import GrowthKernel
 
 
 def test_continuity_of_update():

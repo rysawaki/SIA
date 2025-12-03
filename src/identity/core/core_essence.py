@@ -5,7 +5,7 @@ from torch import Tensor
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
-from src.identity.dynamics.growth_kernel import GrowthKernel, EPS
+from design_graveyard.growth_kernel import GrowthKernel, EPS
 
 
 @dataclass

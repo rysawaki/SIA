@@ -1,166 +1,169 @@
-# src/sia_controller.py
+# src/controller/sia_controller.py
+# -*- coding: utf-8 -*-
 
 import torch
-import torch.nn.functional as F
+import uuid
 import os
-import sys
+from identity.core.soul_state import SoulState, SoulMeta
 
 
-# パス解決
-# SIA_Controllerは、llama_bodyとaffective_brainが同一階層（src/）にあることを前提とします
-# from .llama_body import SelfInjectedLlama
-# from .affective_brain import AffectiveStateManager
-
-class SIA_Controller:
+class SIAController:
     """
-    SIAの魂の永続化、統合、Active Inference的な学習を制御するコントローラー。
-
-    責務:
-    1. Body (LLM) と Brain (情動) の状態を統合的に管理し永続化する。
-    2. Prediction Errorを計算し、SelfSpaceへの刻印（Trace）とBrainへのShockフィードバックを行う。
+    SIAAgent の中枢コントローラ。
+    Body（モデル）と Soul（痕跡・identity成長情報）を切り分けて管理する。
     """
 
-    def __init__(self, body, brain, save_path="experiments/sia_soul_state.pt"):
-        # 外部から注入されるモジュール
-        self.body = body  # SelfInjectedLlamaのインスタンス（SelfSpaceを内包）
-        self.brain = brain  # AffectiveStateManagerのインスタンス
-        self.save_path = save_path
+    def __init__(self, body, growth_kernel=None, trace_tensor=None):
+        self.body = body  # Transformer, SelfSpace 含む
+        self.growth_kernel = growth_kernel
+        self.trace_tensor = trace_tensor
 
-        # 転生機能の実行
-        self._load_soul()
+        # Optional buffers (必要なら保持)
+        self.recent_imprints = None
+        self.affect_history = None
+        self.distortion_field = None
 
-    # ===============================
-    # 1. 永続化（保存とロード）
-    # ===============================
-    def save_soul(self):
-        """魂の状態（SelfSpaceの幾何と情動変数の値）をディスクに焼き付ける"""
-        print(f"    [System] Saving soul state to '{self.save_path}'...")
-        state = {
-            # Bodyが持つSelfSpaceの全パラメータを保存
-            'self_space': self.body.self_space.state_dict(),
-            # Brainが持つ情動変数を保存
-            'brain_energy': self.brain.energy,
-            'brain_stress': self.brain.stress,
-            'brain_arousal': self.brain.arousal,
-            # 将来的に予測ヘッドの重みも保存すべきだが、ここではBody側の責任とする
+        # メタ情報
+        self.num_imprints = 0
+        self.num_shocks = 0
+        self.global_step = 0
+
+    # =========================================================
+    # 🔹 魂の保存
+    # =========================================================
+    def save_soul(self, path: str):
+        """
+        現在のSoulを保存する（Torch形式）。
+        path: "experiments/sia_soul_state.pt" など
+        """
+        soul = self._collect_soul_state()
+        torch.save(soul.to_dict(), path)
+        print(f"[Soul Saved] → {path} (kind={soul.meta.kind})")
+
+    # =========================================================
+    # 🔹 魂の読み込み（Seed/Evolvedを自動判定）
+    # =========================================================
+    def load_soul(self, path: str):
+        """
+        魂データを読み込む。
+        - version に応じて Seed or Evolved として統合
+        - 不完全な古い魂（v1, v2）は seed 扱いで axes のみ復元
+        """
+
+        state = torch.load(path, map_location="cpu")
+        version = state.get("version", 1)
+
+        if version < 3:
+            print("[Legacy Soul Detected] → 認識不能 / seed として取り込む")
+            self._load_legacy_seed(state)
+            return
+
+        soul_state = SoulState.from_dict(state)
+        print(f"[Soul Loaded] kind={soul_state.meta.kind}, step={soul_state.meta.last_step}")
+
+        self._integrate_soul_state(soul_state)
+
+    # =========================================================
+    # 🔸 魂の収集（保存用）
+    # =========================================================
+    def _collect_soul_state(self) -> SoulState:
+        """
+        現在の Identity（魂）を構造化して SoulState に変換。
+        """
+
+        # --- SelfSpace 情報の抽出 ---
+        ss = self.body.self_space
+        self_space = {
+            "self_state": ss.self_state.detach().cpu(),
+            "metric": ss.metric.detach().cpu(),
         }
-        torch.save(state, self.save_path)
+        if hasattr(ss, "axes"):
+            self_space["axes"] = ss.axes.detach().cpu()
 
-    def _load_soul(self):
-        """ディスクから魂の状態を復元する"""
-        if os.path.exists(self.save_path):
-            print(f">>> Found existing soul data at '{self.save_path}'. Loading...")
-            # Bodyのデバイスに合わせてロード
-            state = torch.load(self.save_path, map_location=self.body.device)
+        # --- Trace / Affect / Growth の収集 ---
+        trace = {}
+        if self.trace_tensor is not None:
+            trace["trace_tensor"] = self.trace_tensor.detach().cpu()
+        if self.recent_imprints is not None:
+            trace["recent_imprints"] = self.recent_imprints.detach().cpu()
+        if self.affect_history is not None:
+            trace["affect_history"] = self.affect_history.detach().cpu()
 
-            # SelfSpace (幾何学的記憶) を復元
-            self.body.self_space.load_state_dict(state['self_space'])
+        distortion = {}
+        if self.distortion_field is not None:
+            distortion["distortion_field"] = self.distortion_field.detach().cpu()
 
-            # 脳の状態 (ストレス値など) を復元
-            self.brain.energy = state['brain_energy']
-            self.brain.stress = state['brain_stress']
-            self.brain.arousal = state['brain_arousal']
-            print(">>> Soul Loaded. The trauma persists.")
-        else:
-            print(">>> No past life found. A new soul is born.")
+        growth = {}
+        if self.growth_kernel is not None:
+            growth["growth_kernel_state"] = self.growth_kernel.state_dict()
 
-    # ===============================
-    # 2. 核心機能: Active Inference学習
-    # ===============================
-    @torch.no_grad()
-    def _calculate_and_apply_shock(self, observed_embed: torch.Tensor, expected_embed: torch.Tensor, affect_mult=1.0):
-        """
-        Prediction Errorを計算し、SelfSpaceへの刻印と情動状態の更新を行う。
-        """
-        # 1. Prediction Error (Discrepancy) の計算
-        # Active Inferenceの核: 観測と予測のズレ
-        discrepancy = observed_embed - expected_embed
-
-        # Shock = DiscrepancyのL2ノルム（予測外れが大きいほどShockが大きい）
-        geometric_shock_mag = torch.norm(discrepancy).item()
-
-        # 2. 情動状態の更新（AffectiveStateManagerへのフィードバック）
-        # 予測外れの大きさが「痛み」や「驚き」として情動に影響
-        # 便宜的に、予測外れの大きさをPainの強度としてBrainにフィードバックする（valence=-1.0, impact=shock）
-        pain_impact = geometric_shock_mag * 0.1  # 係数でスケーリング
-        self.brain.perceive_prediction_error(impact=pain_impact)  # (AffectiveStateManagerに新しいメソッドが必要)
-
-        # 3. Learning Rate (Shock) の計算
-        # Learning Shock = BrainのShock信号 * Geometric Shock * 経験の情動的重み
-        signals = self.brain.get_control_signals()
-
-        # Brainが出す情動的学習強度と、幾何学的予測外れの大きさを乗算
-        learning_shock = signals['shock'] * geometric_shock_mag
-
-        # 4. SelfSpaceの更新（Traceの刻印）
-        if learning_shock > 0.05:  # 刻印の閾値
-            # TraceとしてDiscrepancyそのものを刻む（この誤差を自己軸として持つ）
-            trace_vec = discrepancy.squeeze(0).to(self.body.device)
-
-            # AffectはBrainの現在の覚醒度（Arousal）に連動させる
-            affect = self.brain.arousal * affect_mult
-
-            self.body.memorize_experience_vec(  # (llama_bodyに新しいメソッドが必要)
-                trace_vec=trace_vec,
-                shock=learning_shock,
-                affect=affect
-            )
-            print(f"    [Internal] Etching Prediction Error (Shock={learning_shock:.2f}) into SelfSpace...")
-
-        return geometric_shock_mag
-
-    # ===============================
-    # 3. 統合ステップ（実行インターフェース）
-    # ===============================
-    def run_step(self, user_input: str, prompt_builder_fn, valence: float, impact: float):
-
-        # 0. 外部刺激（ユーザーの感情価）を情動中枢にフィードバック
-        self.brain.perceive_stimulus(valence, impact)
-
-        # 1. 制御信号の取得
-        signals = self.brain.get_control_signals()
-        alpha = signals['alpha']
-        refusal = signals['refusal']
-
-        if refusal:
-            self.brain.time_step()
-            self.save_soul()
-            return "...", True  # 応答拒否
-
-        # 2. LLMへのプロンプト組み立てと期待埋め込みの予測
-        full_prompt = prompt_builder_fn(user_input)
-
-        # SelfStateから「期待される応答」の埋め込みを予測
-        expected_embed = self.body.predict_expected_embed()
-
-        # 3. LLMによる生成と「実際の応答」埋め込みの取得（世界が歪む）
-        # Bodyは歪んだ埋め込みを使って生成し、その応答の埋め込み（Observed）を返す
-        response_text, observed_embed = self.body.generate_with_self_and_get_embed(
-            prompt=full_prompt,
-            alpha=alpha
+        # --- メタ情報を構築 ---
+        meta = SoulMeta(
+            version=3,
+            soul_id=uuid.uuid4().hex,
+            kind="evolved" if self.num_imprints >= 10 else "seed",
+            created_step=0,
+            last_step=self.global_step,
+            num_imprints=self.num_imprints,
+            num_shocks=self.num_shocks,
         )
 
-        # 4. 学習（Prediction Errorの計算とSelfの更新）
-        self._calculate_and_apply_shock(observed_embed, expected_embed)
+        return SoulState(
+            meta=meta,
+            self_space=self_space,
+            trace=trace,
+            distortion=distortion,
+            growth=growth,
+        )
 
-        # 5. 時間経過と状態保存
-        self.brain.time_step()
-        self.save_soul()
+    # =========================================================
+    # 🔸 魂の統合（本質的な復元処理）
+    # =========================================================
+    def _integrate_soul_state(self, soul: SoulState):
+        """
+        魂を SelfSpace / Trace / Growth に統合。
+        「seed」と「evolved」で復元範囲を自動で変える。
+        """
 
-        return response_text, False
+        ss_state = {}
+        if "self_state" in soul.self_space:
+            ss_state["self_state"] = soul.self_space["self_state"]
+        if "metric" in soul.self_space:
+            ss_state["metric"] = soul.self_space["metric"]
+        if "axes" in soul.self_space:
+            ss_state["axes"] = soul.self_space["axes"]
 
-# ----------------------------------------------
-# ⚠️ 注意: このコントローラーを機能させるために必要な前提修正
-# ----------------------------------------------
-#
-# 上記のSIA_Controllerを機能させるには、以下のファイルに**重要な修正**が必要です。
-#
-# ### A. src/llama_body.py (SelfInjectedLlama) への修正
-#
-# 1.  **Prediction Headの追加:** `__init__`に`self.prediction_head`を定義し、`predict_expected_embed(self)`メソッドを実装する。
-# 2.  **埋め込み取得の追加:** `generate_with_self(self, ...)`の代わりに、**`generate_with_self_and_get_embed(self, ...)`**を実装し、生成されたテキストとその応答の**平均埋め込みベクトル**を返すようにする。
-# 3.  **Trace受け取りの変更:** `memorize_experience`または新しいメソッド**`memorize_experience_vec(self, trace_vec, shock, affect)`**を実装し、テキストではなく**ベクトルそのもの**をTraceとして受け取れるようにする。（Prediction Errorはベクトルだから）
-#
-# ### B. src/affective_brain.py (AffectiveStateManager) への修正
-#
-# 1.  **予測誤差の知覚メソッドの追加:** **`perceive_prediction_error(self, impact: float)`**を実装する。これは、ユーザーの感情価ではなく、**論理的な予測外れの大きさ**を情動（Stress/Arousal）に反映させるためのパスです。
+        self.body.self_space.load_state_dict(ss_state, strict=False)
+
+        # Evolved の場合のみ、成長履歴を完全反映
+        if soul.meta.is_evolved():
+
+            if "trace_tensor" in soul.trace and self.trace_tensor is not None:
+                self.trace_tensor.copy_(soul.trace["trace_tensor"])
+
+            if "recent_imprints" in soul.trace and self.recent_imprints is not None:
+                self.recent_imprints.copy_(soul.trace["recent_imprints"])
+
+            if "affect_history" in soul.trace and self.affect_history is not None:
+                self.affect_history.copy_(soul.affect_history)
+
+            if "distortion_field" in soul.distortion and self.distortion_field is not None:
+                self.distortion_field.copy_(soul.distortion["distortion_field"])
+
+            if "growth_kernel_state" in soul.growth and self.growth_kernel is not None:
+                self.growth_kernel.load_state_dict(soul.growth["growth_kernel_state"])
+
+            print("[Soul Integration] → 完全継承（Evolved）")
+
+        else:
+            print("[Soul Integration] → 軸のみ反映（Seed）")
+
+    # =========================================================
+    # 🔹 古い魂(v1/v2構造)の読み込み（Seed扱い）
+    # =========================================================
+    def _load_legacy_seed(self, legacy_data: dict):
+        ss = self.body.self_space
+        if "self_space" in legacy_data and "axes" in legacy_data["self_space"]:
+            ss.load_state_dict({"axes": legacy_data["self_space"]["axes"]}, strict=False)
+        print("[Legacy->Seed] → axes のみ継承。Traceなどは破棄。")
+
