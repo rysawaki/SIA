@@ -24,17 +24,22 @@ class MiniSIAConfig:
     # Self 更新・制約
     h_lr: float = 0.05
     max_h_norm: float = 5.0
-    max_trace_norm: float = 10.0
-    max_affect_norm: float = 3.0
+    max_trace_norm: float = 10.0   # （必要なら後で使う）
+    max_affect_norm: float = 3.0   # （必要なら後で使う）
 
     # 行動
     max_action: float = 0.2
+
+    # 過去 / 現在 / 未来 ゲイン
+    alpha_past: float = 0.4    # Trace（過去）の重み
+    beta_present: float = 0.8  # Affect（現在ショック）の重み
+    gamma_future: float = 0.6  # 未来（goal - position）の重み
 
     # シミュレーション
     steps_per_episode: int = 200
     n_episodes: int = 3
 
-    # 安定判定用の「許容閾値」（少し余裕を持たせる）
+    # 安定判定用の「許容閾値」
     stable_h_norm_threshold: float = 6.0
     stable_trace_norm_threshold: float = 12.0
     stable_affect_norm_threshold: float = 4.0
@@ -105,7 +110,7 @@ class ShockModule(nn.Module):
 
 class AffectModule(nn.Module):
     """
-    Affect = tanh(W_s * shock + b)
+    Affect = tanh(W_s * shock)
     """
     def __init__(self, obs_dim: int, affect_dim: int):
         super().__init__()
@@ -137,8 +142,13 @@ class TraceModule(nn.Module):
 class SelfModule(nn.Module):
     """
     Self h を更新し、行動を生成する。
-    h(t+1) = h(t) + h_lr * tanh( W_a * affect + W_t * vec(trace) )
-    action = tanh(w_act * h) * max_action
+
+    h(t+1) = h(t)
+             + h_lr * tanh( α * Past + β * Present + γ * Future )
+
+    Past    = W_t * vec(trace)
+    Present = W_a * affect
+    Future  = W_f * future_signal   # future_signal ≈ goal - position
     """
     def __init__(self, affect_dim: int, h_dim: int, cfg: MiniSIAConfig):
         super().__init__()
@@ -146,14 +156,38 @@ class SelfModule(nn.Module):
         self.cfg = cfg
         trace_flat_dim = affect_dim * h_dim
 
-        self.fc_affect = nn.Linear(affect_dim, h_dim)
+        # 過去（Trace）→ Self
         self.fc_trace = nn.Linear(trace_flat_dim, h_dim)
+        # 現在（Affect）→ Self
+        self.fc_affect = nn.Linear(affect_dim, h_dim)
+        # 未来（goal - pos）→ Self
+        self.fc_future = nn.Linear(1, h_dim)
+
+        # Self → Action
         self.fc_action = nn.Linear(h_dim, 1)
 
-    def forward(self, affect: torch.Tensor, trace: torch.Tensor, h_prev: torch.Tensor):
-        trace_flat = trace.view(-1)
-        # 入力総和
-        u = self.fc_affect(affect) + self.fc_trace(trace_flat)
+    def forward(
+        self,
+        affect: torch.Tensor,
+        trace: torch.Tensor,
+        future_signal: torch.Tensor,
+        h_prev: torch.Tensor,
+    ):
+        # flatten trace
+        trace_flat = trace.view(-1)  # (affect_dim * h_dim,)
+
+        # 各方向の寄与
+        past_term = self.fc_trace(trace_flat)           # 過去
+        present_term = self.fc_affect(affect)           # 現在
+        future_term = self.fc_future(future_signal)     # 未来
+
+        # ゲイン付き合成
+        u = (
+            self.cfg.alpha_past * past_term
+            + self.cfg.beta_present * present_term
+            + self.cfg.gamma_future * future_term
+        )
+
         delta_h = torch.tanh(u)
         h = h_prev + self.cfg.h_lr * delta_h
 
@@ -162,7 +196,7 @@ class SelfModule(nn.Module):
         if norm_h > self.cfg.max_h_norm:
             h = h * (self.cfg.max_h_norm / (norm_h + 1e-8))
 
-        # 行動
+        # 行動生成
         action = torch.tanh(self.fc_action(h))[0] * self.cfg.max_action
         return h, action
 
@@ -191,19 +225,29 @@ class MiniSIAAgent:
         self.prev_obs = None
 
     def step(self, obs: torch.Tensor):
-        # 1. Shock
+        """
+        obs = [position, goal]
+        future_signal = goal - position  （未来との差分）
+        """
+        # 1. Shock（現在の変化）
         shock = self.shock_module(obs, self.prev_obs)
 
-        # 2. Affect
+        # 2. Affect（現在ショックからの情動）
         affect = self.affect_module(shock)
 
-        # 3. Trace
+        # 3. Trace（過去の蓄積）
         self.trace = self.trace_module(affect, self.h, self.trace)
 
-        # 4. Self + Action
-        self.h, action = self.self_module(affect, self.trace, self.h)
+        # 4. Future signal（未来との差分）: shape = (1,)
+        position = obs[0]
+        goal = obs[1]
+        future_raw = goal - position
+        future_signal = torch.tensor([future_raw], dtype=torch.float32)
 
-        # 次のステップのために保存
+        # 5. Self + Action（過去・現在・未来ゲイン付き）
+        self.h, action = self.self_module(affect, self.trace, future_signal, self.h)
+
+        # 次ステップのために保存
         self.prev_obs = obs.clone()
 
         # 安定判定用のログ
@@ -299,7 +343,7 @@ def run_mini_sia_simulation():
 
             monitor.record(metrics)
 
-            # 必要なら途中でデバッグ出力
+            # デバッグしたくなったらここを開ける
             # if step % 50 == 0:
             #     print(f"[Ep {ep} Step {step}] h_norm={metrics['h_norm']:.3f}, "
             #           f"trace_norm={metrics['trace_norm']:.3f}, "
